@@ -51,7 +51,7 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.1.2"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -353,9 +353,19 @@ class StoreAPI:
     @staticmethod
     def install_package(filepath):
         try:
-            cmd = f'Add-AppxPackage -Path "{filepath}"'
-            subprocess.check_call(["powershell", "-NoProfile", "-Command", cmd], creationflags=subprocess.CREATE_NO_WINDOW)
-            return True, "Installed"
+            cmd = f'Add-AppxPackage -Path "{filepath}" -ErrorAction Stop 2>&1'
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", cmd],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                return False, error_msg
+            
+            return True, "Installed successfully"
         except Exception as e:
             return False, str(e)
     
@@ -567,7 +577,11 @@ class MSStoreHelperApp(ctk.CTk):
         
         ctk.CTkButton(info_frame, text="❓ Help", width=80, height=32, fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._show_help).pack(side="right", padx=5)
         
-        # MAIN
+        # LOG PANEL (at bottom - pack BEFORE main so it claims bottom space)
+        self.log_panel = ctk.CTkFrame(self, fg_color=Theme.BG_CARD, corner_radius=0)
+        self._build_log_panel()
+        
+        # MAIN (fills remaining space)
         self.main = ctk.CTkFrame(self, fg_color="transparent")
         self.main.pack(fill="both", expand=True, padx=15, pady=15)
         self.main.grid_columnconfigure(1, weight=1)
@@ -675,6 +689,152 @@ class MSStoreHelperApp(ctk.CTk):
         
         ctk.CTkButton(action_frame, text="⬇️ Download All", height=42, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._start_download).pack(fill="x", pady=(0, 8))
         ctk.CTkButton(action_frame, text="📦 Install Downloaded", height=42, font=("Segoe UI Semibold", 13), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._start_install).pack(fill="x")
+    
+    def _build_log_panel(self):
+        """Build the collapsible log/console panel"""
+        # Toggle bar (always visible)
+        self.log_toggle = ctk.CTkFrame(self.log_panel, fg_color=Theme.BG_INPUT, height=36)
+        self.log_toggle.pack(fill="x", side="top")
+        self.log_toggle.pack_propagate(False)
+        
+        toggle_inner = ctk.CTkFrame(self.log_toggle, fg_color="transparent")
+        toggle_inner.pack(fill="x", padx=15)
+        
+        self.log_toggle_btn = ctk.CTkButton(
+            toggle_inner,
+            text="▼ Console Output",
+            font=("Segoe UI Semibold", 12),
+            fg_color="transparent",
+            hover_color=Theme.BG_CARD_HOVER,
+            anchor="w",
+            command=self._toggle_log_panel
+        )
+        self.log_toggle_btn.pack(side="left", pady=5)
+        
+        self.log_status = ctk.CTkLabel(
+            toggle_inner,
+            text="",
+            font=("Consolas", 10),
+            text_color=Theme.TEXT_MUTED
+        )
+        self.log_status.pack(side="left", padx=15)
+        
+        # Log controls
+        log_controls = ctk.CTkFrame(toggle_inner, fg_color="transparent")
+        log_controls.pack(side="right")
+        
+        ctk.CTkButton(
+            log_controls,
+            text="📋 Copy",
+            width=60,
+            height=26,
+            font=("Segoe UI", 11),
+            fg_color="transparent",
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=self._copy_log
+        ).pack(side="left", padx=3)
+        
+        ctk.CTkButton(
+            log_controls,
+            text="🗑️ Clear",
+            width=60,
+            height=26,
+            font=("Segoe UI", 11),
+            fg_color="transparent",
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=self._clear_log
+        ).pack(side="left", padx=3)
+        
+        # Log content area - starts visible
+        self.log_content = ctk.CTkFrame(self.log_panel, fg_color=Theme.BG_DARK, height=180)
+        self.log_content.pack(fill="x", side="top")
+        self.log_content.pack_propagate(False)
+        
+        self.log_text = ctk.CTkTextbox(
+            self.log_content,
+            font=("Consolas", 11),
+            fg_color=Theme.BG_DARK,
+            text_color=Theme.TEXT_SECONDARY,
+            wrap="word",
+            state="disabled"
+        )
+        self.log_text.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Pack the log panel at bottom BEFORE main content
+        self.log_panel.pack(fill="x", side="bottom")
+        self.log_expanded = True
+        
+        # Add initial log message
+        self._log("INFO", f"MSStoreHelper v{APP_VERSION} initialized")
+        self._log("INFO", f"System Architecture: {SYSTEM_ARCH}")
+        self._log("INFO", f"Administrator: {'Yes' if IS_ADMIN else 'No'}")
+        self._log("INFO", f"Output Directory: {DEFAULT_OUTPUT}")
+    
+    def _toggle_log_panel(self):
+        """Toggle log panel expanded/collapsed"""
+        if self.log_expanded:
+            self.log_content.pack_forget()
+            self.log_toggle_btn.configure(text="▲ Console Output")
+            self.log_expanded = False
+        else:
+            self.log_content.pack(fill="x", side="top")
+            self.log_toggle_btn.configure(text="▼ Console Output")
+            self.log_expanded = True
+            # Scroll to bottom
+            self.log_text.see("end")
+    
+    def _log(self, level, message):
+        """Add a message to the log"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        
+        # Color codes for different levels
+        level_colors = {
+            "INFO": Theme.INFO,
+            "SUCCESS": Theme.SUCCESS,
+            "WARNING": Theme.WARNING,
+            "ERROR": Theme.DANGER,
+            "DEBUG": Theme.TEXT_MUTED
+        }
+        
+        level_icons = {
+            "INFO": "ℹ️",
+            "SUCCESS": "✅",
+            "WARNING": "⚠️",
+            "ERROR": "❌",
+            "DEBUG": "🔍"
+        }
+        
+        icon = level_icons.get(level, "•")
+        formatted = f"[{timestamp}] {icon} {message}\n"
+        
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", formatted)
+        self.log_text.configure(state="disabled")
+        self.log_text.see("end")
+        
+        # Update status in toggle bar
+        short_msg = message[:50] + "..." if len(message) > 50 else message
+        self.log_status.configure(text=short_msg)
+    
+    def _copy_log(self):
+        """Copy log contents to clipboard"""
+        self.log_text.configure(state="normal")
+        content = self.log_text.get("1.0", "end-1c")
+        self.log_text.configure(state="disabled")
+        self.clipboard_clear()
+        self.clipboard_append(content)
+        self._log("INFO", "Log copied to clipboard")
+    
+    def _clear_log(self):
+        """Clear log contents"""
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.configure(state="disabled")
+        self._log("INFO", "Log cleared")
     
     def _clear_content(self):
         for widget in self.content.winfo_children():
@@ -892,7 +1052,16 @@ Fixes "needs to be online" and similar errors.
         threading.Thread(target=self._search_worker, args=(query,), daemon=True).start()
     
     def _search_worker(self, query):
+        self.after(0, lambda: self._log("INFO", f"Searching Microsoft Store for: {query}"))
         results = StoreAPI.search_store(query)
+        if results:
+            self.after(0, lambda: self._log("SUCCESS", f"Found {len(results)} apps"))
+            for r in results[:5]:
+                self.after(0, lambda r=r: self._log("DEBUG", f"  • {r['Name']} ({r['ProductId']})"))
+            if len(results) > 5:
+                self.after(0, lambda: self._log("DEBUG", f"  ... and {len(results) - 5} more"))
+        else:
+            self.after(0, lambda: self._log("WARNING", "No apps found for this search"))
         self.after(0, lambda: self._update_status("Ready", Theme.TEXT_SECONDARY))
         self.after(0, lambda: self._show_search_results(results, query))
     
@@ -909,12 +1078,20 @@ Fixes "needs to be online" and similar errors.
         for app in self.selected_apps:
             names.append(app['Name'])
             self.after(0, lambda n=app['Name']: self._update_status(f"📥 Fetching {n}...", Theme.INFO))
-            all_packages.extend(StoreAPI.get_packages(app['ProductId']))
+            self.after(0, lambda n=app['Name'], pid=app['ProductId']: self._log("INFO", f"Fetching packages for: {n} ({pid})"))
+            packages = StoreAPI.get_packages(app['ProductId'])
+            if packages:
+                self.after(0, lambda n=app['Name'], c=len(packages): self._log("SUCCESS", f"  Found {c} packages for {n}"))
+            else:
+                self.after(0, lambda n=app['Name']: self._log("WARNING", f"  No packages found for {n}"))
+            all_packages.extend(packages)
         
         if not all_packages:
             self.after(0, lambda: self._update_status("⚠️ No packages found", Theme.WARNING))
+            self.after(0, lambda: self._log("ERROR", "No downloadable packages found for any selected app"))
             return
         
+        self.after(0, lambda c=len(all_packages): self._log("INFO", f"Total packages available: {c}"))
         title = ", ".join(names[:2]) + ("..." if len(names) > 2 else "")
         self.after(0, lambda: self._update_status("Ready", Theme.TEXT_SECONDARY))
         self.after(0, lambda: self._show_packages(all_packages, title))
@@ -924,10 +1101,20 @@ Fixes "needs to be online" and similar errors.
         threading.Thread(target=self._fetch_single_worker, args=(app_data,), daemon=True).start()
     
     def _fetch_single_worker(self, app_data):
+        self.after(0, lambda: self._log("INFO", f"Fetching packages for: {app_data['Name']} ({app_data['ProductId']})"))
         packages = StoreAPI.get_packages(app_data['ProductId'])
         if not packages:
             self.after(0, lambda: self._update_status("⚠️ No packages found", Theme.WARNING))
+            self.after(0, lambda: self._log("ERROR", f"No packages found for {app_data['Name']}"))
             return
+        
+        self.after(0, lambda: self._log("SUCCESS", f"Found {len(packages)} packages"))
+        
+        # Log package details
+        bundles = [p for p in packages if p.get('IsBundle')]
+        encrypted = [p for p in packages if p.get('IsEncrypted')]
+        self.after(0, lambda: self._log("DEBUG", f"  Bundles: {len(bundles)}, Encrypted: {len(encrypted)}, Single-arch: {len(packages) - len(bundles)}"))
+        
         self.after(0, lambda: self._update_status("Ready", Theme.TEXT_SECONDARY))
         self.after(0, lambda: self._show_packages(packages, app_data['Name']))
     
@@ -955,6 +1142,9 @@ Fixes "needs to be online" and similar errors.
         threading.Thread(target=worker, daemon=True).start()
     
     def _smart_select(self):
+        self._log("INFO", f"Running Smart Select on {len(self.current_packages)} packages...")
+        self._log("DEBUG", f"  Target architecture: {SYSTEM_ARCH}")
+        
         best = StoreAPI.smart_select(self.current_packages, SYSTEM_ARCH)
         best_names = {p['FileName'] for p in best}
         self.selected_packages = best_names
@@ -962,6 +1152,11 @@ Fixes "needs to be online" and similar errors.
             row.set_selected(row.pkg_data['FileName'] in best_names)
         self._update_selection_info()
         self._update_status(f"✨ Selected {len(best)} recommended files", Theme.SUCCESS)
+        
+        self._log("SUCCESS", f"Smart Select chose {len(best)} packages:")
+        for p in best:
+            ftype = "Bundle" if p.get('IsBundle') else p.get('Architecture', 'neutral')
+            self._log("DEBUG", f"  • {p['FileName'][:60]}... ({ftype})")
     
     def _select_all(self):
         self.selected_packages = {p['FileName'] for p in self.current_packages}
@@ -978,6 +1173,7 @@ Fixes "needs to be online" and similar errors.
     def _add_to_queue(self):
         if not self.selected_packages:
             self._update_status("⚠️ No files selected", Theme.WARNING)
+            self._log("WARNING", "No files selected to add to queue")
             return
         
         count = 0
@@ -989,6 +1185,7 @@ Fixes "needs to be online" and similar errors.
         
         self._update_queue_ui()
         self._update_status(f"✅ Added {count} files to queue", Theme.SUCCESS)
+        self._log("INFO", f"Added {count} files to download queue (total: {len(self.download_queue)})")
     
     def _update_queue_ui(self):
         for widget in self.queue_scroll.winfo_children():
@@ -1016,11 +1213,17 @@ Fixes "needs to be online" and similar errors.
     def _download_worker(self):
         if not os.path.exists(self.output_path):
             os.makedirs(self.output_path)
+            self.after(0, lambda: self._log("INFO", f"Created output directory: {self.output_path}"))
+        
+        self.after(0, lambda: self._log("INFO", f"Starting download of {len(self.download_queue)} files"))
         
         total = len(self.download_queue)
+        success_count = 0
+        
         for i, pkg in enumerate(self.download_queue):
             fname = pkg['FileName']
             self.after(0, lambda n=fname: self._update_status(f"⬇️ Downloading {n[:40]}...", Theme.INFO))
+            self.after(0, lambda n=fname, idx=i+1, tot=total: self._log("INFO", f"[{idx}/{tot}] Downloading: {n}"))
             
             if '_status_widget' in pkg:
                 self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Downloading...", text_color=Theme.INFO))
@@ -1031,16 +1234,21 @@ Fixes "needs to be online" and similar errors.
             def progress_cb(val, idx=i, tot=total):
                 self.after(0, lambda v=(idx + val) / tot: self._update_progress(v))
             
-            success, _ = StoreAPI.download_file(pkg['Url'], filepath, progress_cb)
+            success, error_msg = StoreAPI.download_file(pkg['Url'], filepath, progress_cb)
             
             if '_status_widget' in pkg:
                 if success:
                     self.after(0, lambda w=pkg['_status_widget']: w.configure(text="✅ Done", text_color=Theme.SUCCESS))
+                    self.after(0, lambda n=fname: self._log("SUCCESS", f"  Downloaded: {n}"))
+                    success_count += 1
                 else:
                     self.after(0, lambda w=pkg['_status_widget']: w.configure(text="❌ Failed", text_color=Theme.DANGER))
+                    self.after(0, lambda n=fname, e=error_msg: self._log("ERROR", f"  Failed to download {n}: {e}"))
         
         self.after(0, lambda: self._update_progress(0))
         self.after(0, lambda: self._update_status("✅ Downloads complete!", Theme.SUCCESS))
+        self.after(0, lambda: self._log("SUCCESS", f"Download complete: {success_count}/{total} files successful"))
+        self.after(0, lambda: self._log("INFO", f"Files saved to: {self.output_path}"))
     
     def _start_install(self):
         if not IS_ADMIN:
@@ -1055,22 +1263,68 @@ Fixes "needs to be online" and similar errors.
         threading.Thread(target=self._install_worker, args=(to_install,), daemon=True).start()
     
     def _install_worker(self, packages):
-        for pkg in packages:
+        self.after(0, lambda: self._log("INFO", f"Starting installation of {len(packages)} packages"))
+        self.after(0, lambda: self._log("INFO", "Note: Install order matters - dependencies should be installed first"))
+        
+        success_count = 0
+        total = len(packages)
+        
+        for i, pkg in enumerate(packages):
             fname = pkg['FileName']
+            filepath = pkg['LocalPath']
+            
             self.after(0, lambda n=fname: self._update_status(f"📦 Installing {n[:40]}...", Theme.INFO))
+            self.after(0, lambda n=fname, idx=i+1, tot=total: self._log("INFO", f"[{idx}/{tot}] Installing: {n}"))
+            self.after(0, lambda p=filepath: self._log("DEBUG", f"  Path: {p}"))
             
             if '_status_widget' in pkg:
                 self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Installing...", text_color=Theme.INFO))
             
-            success, _ = StoreAPI.install_package(pkg['LocalPath'])
+            success, error_msg = StoreAPI.install_package(filepath)
             
             if '_status_widget' in pkg:
                 if success:
                     self.after(0, lambda w=pkg['_status_widget']: w.configure(text="✅ Installed", text_color=Theme.SUCCESS))
+                    self.after(0, lambda n=fname: self._log("SUCCESS", f"  Successfully installed: {n}"))
+                    success_count += 1
                 else:
                     self.after(0, lambda w=pkg['_status_widget']: w.configure(text="❌ Error", text_color=Theme.DANGER))
+                    self.after(0, lambda n=fname: self._log("ERROR", f"  Failed to install: {n}"))
+                    
+                    # Log detailed error message
+                    error_lines = error_msg.split('\n')
+                    for line in error_lines:
+                        line = line.strip()
+                        if line:
+                            self.after(0, lambda l=line: self._log("ERROR", f"    {l}"))
+                    
+                    # Provide helpful hints based on common errors
+                    error_lower = error_msg.lower()
+                    if "0x80073cf3" in error_lower or "already installed" in error_lower:
+                        self.after(0, lambda: self._log("INFO", "    Hint: App may already be installed or needs update"))
+                    elif "0x80073d19" in error_lower or "dependency" in error_lower:
+                        self.after(0, lambda: self._log("INFO", "    Hint: Missing dependency - install VCLibs and .NET packages first"))
+                    elif "0x80073cff" in error_lower or "sideload" in error_lower:
+                        self.after(0, lambda: self._log("INFO", "    Hint: Enable Developer Mode or Sideloading in Windows Settings"))
+                    elif "0x80073cf9" in error_lower:
+                        self.after(0, lambda: self._log("INFO", "    Hint: Package may require a different Windows version"))
+                    elif "0x80073d02" in error_lower or "in use" in error_lower:
+                        self.after(0, lambda: self._log("INFO", "    Hint: Close the app if it's running and try again"))
+                    elif "access" in error_lower or "denied" in error_lower:
+                        self.after(0, lambda: self._log("INFO", "    Hint: Run as Administrator"))
+                    elif "signature" in error_lower or "certificate" in error_lower:
+                        self.after(0, lambda: self._log("INFO", "    Hint: Package signature issue - try a different version"))
         
         self.after(0, lambda: self._update_status("✅ Installation complete!", Theme.SUCCESS))
+        
+        if success_count == total:
+            self.after(0, lambda: self._log("SUCCESS", f"Installation complete: All {total} packages installed successfully"))
+        else:
+            self.after(0, lambda: self._log("WARNING", f"Installation complete: {success_count}/{total} packages installed"))
+            self.after(0, lambda: self._log("INFO", "Tip: Check the errors above. Common fixes:"))
+            self.after(0, lambda: self._log("INFO", "  1. Install dependencies (VCLibs, .NET) before main apps"))
+            self.after(0, lambda: self._log("INFO", "  2. Enable Developer Mode in Windows Settings"))
+            self.after(0, lambda: self._log("INFO", "  3. Try a different package version (older/newer)"))
     
     def _run_repair(self):
         if not IS_ADMIN:
@@ -1106,8 +1360,11 @@ Fixes "needs to be online" and similar errors.
         ctk.CTkButton(btn_frame, text="🔧 Repair", width=100, fg_color=Theme.DANGER, hover_color=Theme.DANGER_HOVER, command=do_repair).pack(side="left", padx=10)
     
     def _repair_worker(self):
+        self.after(0, lambda: self._log("INFO", "Starting Microsoft Store repair..."))
+        
         def log_cb(msg):
             self.after(0, lambda m=msg: self._update_status(m, Theme.INFO))
+            self.after(0, lambda m=msg: self._log("INFO", m))
         
         def progress_cb(val):
             self.after(0, lambda v=val: self._update_progress(v))
@@ -1117,10 +1374,20 @@ Fixes "needs to be online" and similar errors.
         
         self.after(0, lambda: self._update_progress(0))
         
+        # Log results
+        self.after(0, lambda: self._log("INFO", "Repair results:"))
+        for desc, ok in results:
+            if ok:
+                self.after(0, lambda d=desc: self._log("SUCCESS", f"  ✓ {d}"))
+            else:
+                self.after(0, lambda d=desc: self._log("ERROR", f"  ✗ {d}"))
+        
         if success_count == len(results):
             self.after(0, lambda: self._update_status("✅ Repair complete! Please restart your PC.", Theme.SUCCESS))
+            self.after(0, lambda: self._log("SUCCESS", "Repair complete! Please restart your PC for changes to take effect."))
         else:
             self.after(0, lambda: self._update_status(f"⚠️ Repair done ({success_count}/{len(results)} steps)", Theme.WARNING))
+            self.after(0, lambda: self._log("WARNING", f"Repair partially complete: {success_count}/{len(results)} steps succeeded"))
 
 
 if __name__ == "__main__":
