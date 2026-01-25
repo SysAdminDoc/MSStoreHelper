@@ -24,27 +24,6 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 
 ---
 
-## 📸 Screenshots
-
-<details>
-<summary>Click to expand screenshots</summary>
-
-### Main Interface
-![Main Interface](screenshots/main.png)
-
-### Search Results
-![Search Results](screenshots/search.png)
-
-### Package Selection
-![Package Selection](screenshots/packages.png)
-
-### Console Output
-![Console Output](screenshots/console.png)
-
-</details>
-
----
-
 ## 🖥️ Requirements
 
 - **Windows 10/11** (including LTSC editions)
@@ -64,7 +43,7 @@ Dependencies are auto-installed on first run:
 ### Option 1: Run Directly
 ```powershell
 # Clone or download
-git clone https://github.com/yourusername/MSStoreHelper.git
+git clone https://github.com/SysAdminDoc/MSStoreHelper.git
 cd MSStoreHelper
 
 # Run (dependencies auto-install)
