@@ -11,6 +11,9 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 
 <img width="1602" height="1039" alt="2026-01-24 20_16_53-📦 MSStoreHelper v3 1 0" src="https://github.com/user-attachments/assets/f1318c15-a736-442f-9a26-b00f972503a1" />
 
+
+![Screenshot](screenshot.png)
+
 ## ✨ Features
 
 - 🔍 **Search the Microsoft Store** - Find any app by name using the official Microsoft API
