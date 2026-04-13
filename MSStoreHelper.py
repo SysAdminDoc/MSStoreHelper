@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 MSStoreHelper - Microsoft Store App Installer for Windows LTSC
 A user-friendly tool to download and install Microsoft Store apps
