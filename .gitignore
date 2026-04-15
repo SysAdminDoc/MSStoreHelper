@@ -10,3 +10,4 @@ build/
 .venv/
 venv/
 *.bak
+CLAUDE.md
