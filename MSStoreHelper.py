@@ -61,7 +61,7 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.6.0"
+APP_VERSION = "3.7.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -443,28 +443,38 @@ if ($sig.SignerCertificate) {{
         return "0x80073d06" in error_lower or "higher version" in error_lower
     
     @staticmethod
-    def run_repair(log_callback=None, progress_callback=None):
-        steps = [
-            ("🔧 Resetting Internet settings...", 'RunDll32.exe InetCpl.cpl,ResetIEtoDefaults'),
+    def get_store_repair_steps():
+        return [
             ("🔧 Starting Windows Update...", 'Start-Service -Name wuauserv -ErrorAction SilentlyContinue'),
             ("🔧 Starting BITS...", 'Start-Service -Name bits -ErrorAction SilentlyContinue'),
-            ("🧹 Clearing Store cache...", 'Start-Process wsreset.exe -WindowStyle Hidden -Wait'),
-            ("🧹 Clearing tokens...", r'Remove-Item "$env:LOCALAPPDATA\Packages\Microsoft.WindowsStore_8wekyb3d8bbwe\LocalCache\*" -Recurse -Force -ErrorAction SilentlyContinue'),
-            ("🔄 Re-registering Store...", r'Get-AppxPackage -AllUsers Microsoft.WindowsStore | ForEach-Object { Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml" -ErrorAction SilentlyContinue }'),
+            ("🔐 Starting licensing services...", 'Start-Service -Name ClipSVC -ErrorAction SilentlyContinue; Start-Service -Name LicenseManager -ErrorAction SilentlyContinue'),
+            ("🧹 Closing Store broker processes...", 'Get-Process WinStore.App,MicrosoftStore,RuntimeBroker -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue'),
+            ("🧹 Resetting Store cache...", 'Start-Process wsreset.exe -WindowStyle Hidden -Wait'),
+            ("🧹 Rebuilding Store token cache...", r'$paths = @("$env:LOCALAPPDATA\Microsoft\TokenBroker\Cache\*", "$env:LOCALAPPDATA\Packages\Microsoft.WindowsStore_8wekyb3d8bbwe\LocalCache\*", "$env:LOCALAPPDATA\Packages\Microsoft.WindowsStore_8wekyb3d8bbwe\AC\TokenBroker\Cache\*", "$env:LOCALAPPDATA\Packages\Microsoft.AAD.BrokerPlugin_cw5n1h2txyewy\AC\TokenBroker\Cache\*"); foreach ($path in $paths) { Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue }'),
+            ("🔄 Resetting Store package state...", 'if (Get-Command Reset-AppxPackage -ErrorAction SilentlyContinue) { Get-AppxPackage Microsoft.WindowsStore -ErrorAction SilentlyContinue | Reset-AppxPackage -ErrorAction SilentlyContinue; Get-AppxPackage Microsoft.StorePurchaseApp -ErrorAction SilentlyContinue | Reset-AppxPackage -ErrorAction SilentlyContinue }'),
+            ("🔄 Re-registering Store packages...", r'@("Microsoft.WindowsStore", "Microsoft.StorePurchaseApp") | ForEach-Object { Get-AppxPackage -AllUsers $_ -ErrorAction SilentlyContinue | ForEach-Object { Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml" -ErrorAction SilentlyContinue } }'),
+            ("🔐 Re-syncing Store licensing...", r'Start-Service -Name ClipSVC -ErrorAction SilentlyContinue; Start-Service -Name LicenseManager -ErrorAction SilentlyContinue; Get-AppxPackage Microsoft.StorePurchaseApp -ErrorAction SilentlyContinue | ForEach-Object { Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml" -ErrorAction SilentlyContinue }'),
             ("🌐 Resetting network...", 'netsh winsock reset 2>$null'),
             ("🌐 Flushing DNS...", 'ipconfig /flushdns 2>$null'),
         ]
+
+    @staticmethod
+    def run_repair(log_callback=None, progress_callback=None):
+        steps = StoreAPI.get_store_repair_steps()
         
         results = []
         for i, (desc, cmd) in enumerate(steps):
             if log_callback:
                 log_callback(desc)
             try:
-                if 'RunDll32' in cmd:
-                    subprocess.run(cmd, shell=True, timeout=15)
-                else:
-                    subprocess.run([POWERSHELL_EXE, "-NoProfile", "-Command", cmd], creationflags=subprocess.CREATE_NO_WINDOW, timeout=30)
-                results.append((desc, True))
+                result = subprocess.run(
+                    [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
+                    capture_output=True,
+                    text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    timeout=90
+                )
+                results.append((desc, result.returncode == 0))
             except:
                 results.append((desc, False))
             
@@ -1480,34 +1490,10 @@ Fixes "needs to be online" and similar errors.
         if not IS_ADMIN:
             self._update_status("⚠️ Administrator required", Theme.WARNING)
             return
-        
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Repair Store")
-        dialog.geometry("400x200")
-        dialog.transient(self)
-        dialog.grab_set()
-        
-        dialog.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() - 400) // 2
-        y = self.winfo_y() + (self.winfo_height() - 200) // 2
-        dialog.geometry(f"+{x}+{y}")
-        
-        content = ctk.CTkFrame(dialog, fg_color="transparent")
-        content.pack(fill="both", expand=True, padx=25, pady=25)
-        
-        ctk.CTkLabel(content, text="🔧 Repair Microsoft Store?", font=("Segoe UI Semibold", 18)).pack()
-        ctk.CTkLabel(content, text="This will reset Store settings, clear cache,\nand fix common connectivity issues.\n\nA reboot may be required.", font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY, justify="center").pack(pady=15)
-        
-        btn_frame = ctk.CTkFrame(content, fg_color="transparent")
-        btn_frame.pack()
-        
-        def do_repair():
-            dialog.destroy()
-            self._update_status("🔧 Repairing Store...", Theme.INFO)
-            threading.Thread(target=self._repair_worker, daemon=True).start()
-        
-        ctk.CTkButton(btn_frame, text="Cancel", width=100, fg_color="transparent", border_width=1, border_color=Theme.BORDER, command=dialog.destroy).pack(side="left", padx=10)
-        ctk.CTkButton(btn_frame, text="🔧 Repair", width=100, fg_color=Theme.DANGER, hover_color=Theme.DANGER_HOVER, command=do_repair).pack(side="left", padx=10)
+
+        self._update_status("🔧 Repairing Store...", Theme.INFO)
+        self._log("INFO", "Store repair preset started")
+        threading.Thread(target=self._repair_worker, daemon=True).start()
     
     def _repair_worker(self):
         self.after(0, lambda: self._log("INFO", "Starting Microsoft Store repair..."))

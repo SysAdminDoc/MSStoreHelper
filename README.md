@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.6.0-blue)
+![Version](https://img.shields.io/badge/version-3.7.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -25,7 +25,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 🛡️ **Signature Verification** - Blocks installs unless the package signature chains to Microsoft
 - 📥 **Download Queue** - Queue multiple packages with progress tracking
 - 📦 **Install Packages** - Install downloaded apps directly (requires Admin)
-- 🔧 **Store Repair** - Built-in repair tool for Microsoft Store connectivity issues
+- 🔧 **Store Repair** - Built-in repair preset for Store cache, TokenBroker, licensing, and connectivity issues
 - 📋 **Verbose Console** - Detailed logging with error hints and troubleshooting tips
 
 ---
@@ -90,8 +90,8 @@ python MSStoreHelper.py
 If you see errors like "The server stumbled" or "needs to be online":
 
 1. Click **"🔧 Repair Store"** in the sidebar
-2. Confirm the repair operation
-3. Restart your PC when prompted
+2. Watch the console for cache, token, and licensing repair results
+3. Restart your PC if the console recommends it
 
 ---
 
@@ -157,7 +157,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.6.0"
+APP_VERSION = "3.7.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 
