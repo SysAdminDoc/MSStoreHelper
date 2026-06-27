@@ -61,7 +61,7 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.8.0"
+APP_VERSION = "3.9.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -468,6 +468,15 @@ if ($sig.SignerCertificate) {{
         ]
 
     @staticmethod
+    def get_licensing_reset_steps():
+        return [
+            ("🔐 Stopping licensing services...", 'Stop-Service -Name LicenseManager -Force -ErrorAction SilentlyContinue; Stop-Service -Name ClipSVC -Force -ErrorAction SilentlyContinue'),
+            ("🧹 Clearing ClipSVC license cache...", r'$paths = @("$env:ProgramData\Microsoft\Windows\ClipSVC\GenuineTicket\*", "$env:ProgramData\Microsoft\Windows\ClipSVC\Tokens\*"); foreach ($path in $paths) { Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue }'),
+            ("🔐 Starting licensing services...", 'Start-Service -Name ClipSVC -ErrorAction SilentlyContinue; Start-Service -Name LicenseManager -ErrorAction SilentlyContinue'),
+            ("🔄 Re-registering Store licensing app...", r'@("Microsoft.StorePurchaseApp", "Microsoft.WindowsStore") | ForEach-Object { Get-AppxPackage -AllUsers $_ -ErrorAction SilentlyContinue | ForEach-Object { Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml" -ErrorAction SilentlyContinue } }'),
+        ]
+
+    @staticmethod
     def _run_powershell_steps(steps, log_callback=None, progress_callback=None, timeout=90):
         results = []
         for i, (desc, cmd) in enumerate(steps):
@@ -497,6 +506,10 @@ if ($sig.SignerCertificate) {{
     @staticmethod
     def run_provisioning_repair(log_callback=None, progress_callback=None):
         return StoreAPI._run_powershell_steps(StoreAPI.get_provisioning_repair_steps(), log_callback, progress_callback)
+
+    @staticmethod
+    def run_licensing_reset(log_callback=None, progress_callback=None):
+        return StoreAPI._run_powershell_steps(StoreAPI.get_licensing_reset_steps(), log_callback, progress_callback)
 
 # ==================== UI COMPONENTS ====================
 
@@ -771,7 +784,8 @@ class MSStoreHelperApp(ctk.CTk):
         repair_frame.pack(fill="x", padx=15, pady=15)
         
         ctk.CTkButton(repair_frame, text="🔧 Repair Store", height=40, font=("Segoe UI Semibold", 13), fg_color=Theme.DANGER, hover_color=Theme.DANGER_HOVER, command=self._run_repair).pack(fill="x", pady=(0, 6))
-        ctk.CTkButton(repair_frame, text="👥 Provision Store", height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._run_provisioning_repair).pack(fill="x")
+        ctk.CTkButton(repair_frame, text="👥 Provision Store", height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._run_provisioning_repair).pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(repair_frame, text="🔐 Reset Licensing", height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._run_licensing_reset).pack(fill="x")
         ctk.CTkLabel(repair_frame, text="Fix connectivity and new-profile Store registration", font=("Segoe UI", 10), text_color=Theme.TEXT_MUTED, wraplength=220).pack(pady=(4, 0))
     
     def _build_queue_panel(self):
@@ -1519,6 +1533,15 @@ Fixes "needs to be online" and similar errors.
         self._update_status("👥 Repairing Store provisioning...", Theme.INFO)
         self._log("INFO", "Store provisioning repair started")
         threading.Thread(target=self._provisioning_repair_worker, daemon=True).start()
+
+    def _run_licensing_reset(self):
+        if not IS_ADMIN:
+            self._update_status("⚠️ Administrator required", Theme.WARNING)
+            return
+
+        self._update_status("🔐 Resetting Store licensing...", Theme.INFO)
+        self._log("INFO", "Store licensing reset started")
+        threading.Thread(target=self._licensing_reset_worker, daemon=True).start()
     
     def _repair_worker(self):
         self.after(0, lambda: self._log("INFO", "Starting Microsoft Store repair..."))
@@ -1575,6 +1598,32 @@ Fixes "needs to be online" and similar errors.
         else:
             self.after(0, lambda: self._update_status(f"⚠️ Provisioning repair done ({success_count}/{len(results)} steps)", Theme.WARNING))
             self.after(0, lambda: self._log("WARNING", f"Provisioning repair partially complete: {success_count}/{len(results)} steps succeeded"))
+
+    def _licensing_reset_worker(self):
+        def log_cb(msg):
+            self.after(0, lambda m=msg: self._update_status(m, Theme.INFO))
+            self.after(0, lambda m=msg: self._log("INFO", m))
+
+        def progress_cb(val):
+            self.after(0, lambda v=val: self._update_progress(v))
+
+        results = StoreAPI.run_licensing_reset(log_cb, progress_cb)
+        success_count = sum(1 for _, ok in results if ok)
+
+        self.after(0, lambda: self._update_progress(0))
+        self.after(0, lambda: self._log("INFO", "Licensing reset results:"))
+        for desc, ok in results:
+            if ok:
+                self.after(0, lambda d=desc: self._log("SUCCESS", f"  ✓ {d}"))
+            else:
+                self.after(0, lambda d=desc: self._log("ERROR", f"  ✗ {d}"))
+
+        if success_count == len(results):
+            self.after(0, lambda: self._update_status("✅ Licensing reset complete", Theme.SUCCESS))
+            self.after(0, lambda: self._log("SUCCESS", "Licensing reset complete. Reopen affected Store apps if needed."))
+        else:
+            self.after(0, lambda: self._update_status(f"⚠️ Licensing reset done ({success_count}/{len(results)} steps)", Theme.WARNING))
+            self.after(0, lambda: self._log("WARNING", f"Licensing reset partially complete: {success_count}/{len(results)} steps succeeded"))
 
 
 if __name__ == "__main__":

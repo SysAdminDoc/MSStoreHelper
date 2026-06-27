@@ -33,6 +33,19 @@ class StoreRepairTests(unittest.TestCase):
         self.assertIn("Microsoft.DesktopAppInstaller", commands)
         self.assertIn("Add-AppxPackage", commands)
 
+    def test_licensing_reset_steps_restart_services_and_clear_cache(self):
+        steps = StoreAPI.get_licensing_reset_steps()
+        descriptions = "\n".join(description for description, _command in steps)
+        commands = "\n".join(command for _description, command in steps)
+
+        self.assertIn("Stopping licensing services", descriptions)
+        self.assertIn("Clearing ClipSVC license cache", descriptions)
+        self.assertIn("Starting licensing services", descriptions)
+        self.assertIn("ClipSVC", commands)
+        self.assertIn("LicenseManager", commands)
+        self.assertIn("GenuineTicket", commands)
+        self.assertIn("Microsoft.StorePurchaseApp", commands)
+
 
 if __name__ == "__main__":
     unittest.main()
