@@ -147,8 +147,16 @@ def installed_version_satisfies_package(package, installed_version):
     return compare_version_tuples(installed, available) >= 0
 
 
-def _candidate_score(package, target_arch):
+def _candidate_score(package, target_arch, prefer_exact_arch=False):
     arch = package_architecture(package)
+    if prefer_exact_arch:
+        return (
+            1 if arch == target_arch.lower() else 0,
+            package_version_tuple(package["FileName"]),
+            1 if is_bundle_package(package) else 0,
+            1 if arch == "neutral" else 0,
+        )
+
     return (
         package_version_tuple(package["FileName"]),
         1 if is_bundle_package(package) else 0,
@@ -157,7 +165,7 @@ def _candidate_score(package, target_arch):
     )
 
 
-def select_recommended_packages(packages, target_arch):
+def select_recommended_packages(packages, target_arch, prefer_exact_arch=False):
     """Pick best installable packages, including dependency frameworks."""
     best_by_identity = {}
     for package in packages:
@@ -168,7 +176,7 @@ def select_recommended_packages(packages, target_arch):
 
         key = package_identity(package["FileName"]).lower()
         current = best_by_identity.get(key)
-        if current is None or _candidate_score(package, target_arch) > _candidate_score(current, target_arch):
+        if current is None or _candidate_score(package, target_arch, prefer_exact_arch) > _candidate_score(current, target_arch, prefer_exact_arch):
             best_by_identity[key] = package
 
     return order_packages_for_install(best_by_identity.values(), target_arch)

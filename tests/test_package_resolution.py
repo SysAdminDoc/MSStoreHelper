@@ -59,6 +59,17 @@ class PackageResolutionTests(unittest.TestCase):
         self.assertEqual(len(selected), 1)
         self.assertEqual(selected[0]["FileName"], "Contoso.App_2.5.0.0_x64__8wekyb3d8bbwe.Msix")
 
+    def test_explicit_architecture_override_prefers_exact_arch(self):
+        packages = [
+            package("Contoso.App_3.0.0.0_neutral__8wekyb3d8bbwe.Msixbundle", arch="neutral", is_bundle=True),
+            package("Contoso.App_2.5.0.0_x64__8wekyb3d8bbwe.Msix", arch="x64"),
+        ]
+
+        selected = select_recommended_packages(packages, "x64", prefer_exact_arch=True)
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["FileName"], "Contoso.App_2.5.0.0_x64__8wekyb3d8bbwe.Msix")
+
     def test_order_packages_for_install_sorts_manual_queue(self):
         packages = [
             package("Contoso.App_5.0.0.0_x64__8wekyb3d8bbwe.Msix"),

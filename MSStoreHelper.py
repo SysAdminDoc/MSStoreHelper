@@ -59,7 +59,7 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.4.0"
+APP_VERSION = "3.5.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -295,9 +295,9 @@ class StoreAPI:
             return None
     
     @staticmethod
-    def smart_select(packages, target_arch):
+    def smart_select(packages, target_arch, prefer_exact_arch=False):
         """Intelligently select the best packages"""
-        return select_recommended_packages(packages, target_arch)
+        return select_recommended_packages(packages, target_arch, prefer_exact_arch)
 
     @staticmethod
     def order_packages_for_install(packages, target_arch):
@@ -467,7 +467,7 @@ class SearchResultTile(ctk.CTkFrame):
 
 
 class PackageRow(ctk.CTkFrame):
-    def __init__(self, master, pkg_data, on_toggle, index):
+    def __init__(self, master, pkg_data, on_toggle, index, target_arch):
         super().__init__(master, fg_color=Theme.BG_CARD if index % 2 == 0 else "transparent", corner_radius=6)
         
         self.pkg_data = pkg_data
@@ -496,7 +496,7 @@ class PackageRow(ctk.CTkFrame):
         ctk.CTkLabel(tags_frame, text=f" {ftype} ", font=("Consolas", 10), fg_color=type_color, corner_radius=4, text_color="#000000" if type_color == Theme.BUNDLE_COLOR else Theme.TEXT_PRIMARY).pack(side="left", padx=(0, 6))
         
         arch = pkg_data.get('Architecture', 'neutral')
-        arch_color = Theme.ARCH_MATCH if arch in [SYSTEM_ARCH, 'neutral'] else Theme.TEXT_MUTED
+        arch_color = Theme.ARCH_MATCH if arch in [target_arch, 'neutral'] else Theme.TEXT_MUTED
         ctk.CTkLabel(tags_frame, text=f" {arch} ", font=("Consolas", 10), text_color=arch_color).pack(side="left", padx=(0, 6))
 
         if is_dependency_package(pkg_data):
@@ -563,10 +563,22 @@ class MSStoreHelperApp(ctk.CTk):
         self.selected_packages = set()
         self.package_rows = []
         self.current_view = "welcome"
+        self.arch_options = [f"Auto ({SYSTEM_ARCH})", "x64", "x86", "arm64", "arm", "neutral"]
+        self.arch_override_var = ctk.StringVar(value=self.arch_options[0])
+        self.package_scroll = None
         self.output_path = DEFAULT_OUTPUT
         
         self._build_ui()
         self._show_welcome()
+
+    def _target_arch(self):
+        choice = self.arch_override_var.get()
+        if choice.startswith("Auto"):
+            return SYSTEM_ARCH
+        return choice.lower()
+
+    def _has_arch_override(self):
+        return not self.arch_override_var.get().startswith("Auto")
     
     def _build_ui(self):
         # HEADER
@@ -851,6 +863,7 @@ class MSStoreHelperApp(ctk.CTk):
         self._log("INFO", "Log cleared")
     
     def _clear_content(self):
+        self.package_scroll = None
         for widget in self.content.winfo_children():
             widget.destroy()
     
@@ -955,6 +968,8 @@ class MSStoreHelperApp(ctk.CTk):
         ctk.CTkButton(tb_inner, text="✨ Smart Select", width=120, height=32, font=("Segoe UI", 12), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._smart_select).pack(side="left", padx=(0, 8))
         ctk.CTkButton(tb_inner, text="Select All", width=90, height=32, font=("Segoe UI", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._select_all).pack(side="left", padx=(0, 8))
         ctk.CTkButton(tb_inner, text="Clear", width=70, height=32, font=("Segoe UI", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._select_none).pack(side="left")
+        ctk.CTkLabel(tb_inner, text="Arch", font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY).pack(side="left", padx=(14, 6))
+        ctk.CTkOptionMenu(tb_inner, values=self.arch_options, variable=self.arch_override_var, width=120, height=32, font=("Segoe UI", 12), fg_color=Theme.BG_INPUT, button_color=Theme.PRIMARY, button_hover_color=Theme.PRIMARY_HOVER, command=self._on_arch_override_change).pack(side="left")
         ctk.CTkButton(tb_inner, text="➕ Add to Queue", width=130, height=32, font=("Segoe UI Semibold", 12), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._add_to_queue).pack(side="right")
         
         col_header = ctk.CTkFrame(self.content, fg_color=Theme.BG_INPUT, corner_radius=6)
@@ -968,15 +983,28 @@ class MSStoreHelperApp(ctk.CTk):
         ctk.CTkLabel(ch_inner, text="File Name", font=("Segoe UI Semibold", 11), anchor="w").grid(row=0, column=1, sticky="w")
         ctk.CTkLabel(ch_inner, text="Size", font=("Segoe UI Semibold", 11), width=80).grid(row=0, column=2, padx=(0, 10))
         
-        scroll = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
-        scroll.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        
-        for i, pkg in enumerate(packages):
-            row = PackageRow(scroll, pkg, self._on_package_toggle, i)
-            row.pack(fill="x", pady=1)
-            self.package_rows.append(row)
+        self.package_scroll = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
+        self.package_scroll.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self._render_package_rows()
         
         self._fetch_sizes_async()
+
+    def _render_package_rows(self):
+        if not self.package_scroll:
+            return
+
+        for widget in self.package_scroll.winfo_children():
+            widget.destroy()
+
+        self.package_rows.clear()
+        target_arch = self._target_arch()
+        for i, pkg in enumerate(self.current_packages):
+            row = PackageRow(self.package_scroll, pkg, self._on_package_toggle, i, target_arch)
+            row.set_selected(pkg['FileName'] in self.selected_packages)
+            row.pack(fill="x", pady=1)
+            self.package_rows.append(row)
+
+        self._update_selection_info()
     
     def _show_help(self):
         dialog = ctk.CTkToplevel(self)
@@ -1036,6 +1064,12 @@ Fixes "needs to be online" and similar errors.
     
     def _update_quickfix_desc(self, choice):
         self.quickfix_desc.configure(text=QUICK_FIX_PRESETS.get(choice, {}).get("description", ""))
+
+    def _on_arch_override_change(self, _choice=None):
+        target_arch = self._target_arch()
+        mode = "override" if self._has_arch_override() else "auto"
+        self._log("INFO", f"Target architecture set to {target_arch} ({mode})")
+        self._render_package_rows()
     
     def _on_app_toggle(self, app_data, selected):
         if selected:
@@ -1157,9 +1191,10 @@ Fixes "needs to be online" and similar errors.
     
     def _smart_select(self):
         self._log("INFO", f"Running Smart Select on {len(self.current_packages)} packages...")
-        self._log("DEBUG", f"  Target architecture: {SYSTEM_ARCH}")
+        target_arch = self._target_arch()
+        self._log("DEBUG", f"  Target architecture: {target_arch}")
         
-        best = StoreAPI.smart_select(self.current_packages, SYSTEM_ARCH)
+        best = StoreAPI.smart_select(self.current_packages, target_arch, self._has_arch_override())
         best_names = {p['FileName'] for p in best}
         self.selected_packages = best_names
         for row in self.package_rows:
@@ -1197,7 +1232,7 @@ Fixes "needs to be online" and similar errors.
                     self.download_queue.append(annotate_package(pkg.copy()))
                     count += 1
 
-        self.download_queue = StoreAPI.order_packages_for_install(self.download_queue, SYSTEM_ARCH)
+        self.download_queue = StoreAPI.order_packages_for_install(self.download_queue, self._target_arch())
         dependency_count = sum(1 for pkg in self.download_queue if is_dependency_package(pkg))
 
         self._update_queue_ui()
@@ -1275,7 +1310,7 @@ Fixes "needs to be online" and similar errors.
             return
         
         to_install = [p for p in self.download_queue if p.get('LocalPath') and os.path.exists(p.get('LocalPath', ''))]
-        to_install = StoreAPI.order_packages_for_install(to_install, SYSTEM_ARCH)
+        to_install = StoreAPI.order_packages_for_install(to_install, self._target_arch())
         if not to_install:
             self._update_status("⚠️ No downloaded files", Theme.WARNING)
             return
