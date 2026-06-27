@@ -46,6 +46,21 @@ class StoreRepairTests(unittest.TestCase):
         self.assertIn("GenuineTicket", commands)
         self.assertIn("Microsoft.StorePurchaseApp", commands)
 
+    def test_cache_rebuild_steps_scan_backup_and_recreate_cache(self):
+        steps = StoreAPI.get_cache_rebuild_steps()
+        descriptions = "\n".join(description for description, _command in steps)
+        commands = "\n".join(command for _description, command in steps)
+
+        self.assertIn("Scanning Store cache folders", descriptions)
+        self.assertIn("Backing up existing Store caches", descriptions)
+        self.assertIn("Rebuilding clean Store cache folders", descriptions)
+        self.assertIn("LocalCache", commands)
+        self.assertIn("INetCache", commands)
+        self.assertIn("Move-Item", commands)
+        self.assertIn(".bak-", commands)
+        self.assertIn("New-Item", commands)
+        self.assertIn("wsreset.exe", commands)
+
 
 if __name__ == "__main__":
     unittest.main()
