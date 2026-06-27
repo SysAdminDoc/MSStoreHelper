@@ -12,6 +12,7 @@ import platform
 import threading
 import ctypes
 import webbrowser
+import json
 from datetime import datetime
 from msstore_package_resolution import (
     annotate_package,
@@ -23,6 +24,7 @@ from msstore_package_resolution import (
     package_version_tuple,
     package_role_label,
     select_recommended_packages,
+    signature_info_is_valid_microsoft,
 )
 
 # ==================== DEPENDENCY AUTO-INSTALL ====================
@@ -59,11 +61,23 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.5.0"
+APP_VERSION = "3.6.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+WINDOWS_DIR = os.environ.get("WINDIR", r"C:\Windows")
+WINDOWS_POWERSHELL = os.path.join(WINDOWS_DIR, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+POWERSHELL_EXE = WINDOWS_POWERSHELL if os.path.exists(WINDOWS_POWERSHELL) else "powershell"
+POWERSHELL_SECURITY_MODULE = os.path.join(
+    WINDOWS_DIR,
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "Modules",
+    "Microsoft.PowerShell.Security",
+    "Microsoft.PowerShell.Security.psd1",
+)
 
 try:
     DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
@@ -326,7 +340,7 @@ class StoreAPI:
         try:
             cmd = f'Add-AppxPackage -Path "{filepath}" -ErrorAction Stop 2>&1'
             result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", cmd],
+                [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
                 capture_output=True,
                 text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW
@@ -341,6 +355,59 @@ class StoreAPI:
             return False, str(e)
 
     @staticmethod
+    def verify_package_signature(filepath):
+        try:
+            safe_path = filepath.replace("'", "''")
+            safe_module = POWERSHELL_SECURITY_MODULE.replace("'", "''")
+            cmd = f"""
+Import-Module '{safe_module}' -ErrorAction Stop
+$path = '{safe_path}'
+$sig = Get-AuthenticodeSignature -FilePath $path
+$chainOk = $false
+$rootSubject = ''
+$rootThumbprint = ''
+if ($sig.SignerCertificate) {{
+    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+    $chainOk = $chain.Build($sig.SignerCertificate)
+    if ($chain.ChainElements.Count -gt 0) {{
+        $root = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate
+        $rootSubject = $root.Subject
+        $rootThumbprint = $root.Thumbprint
+    }}
+}}
+[pscustomobject]@{{
+    Status = "$($sig.Status)"
+    StatusMessage = "$($sig.StatusMessage)"
+    Signer = if ($sig.SignerCertificate) {{ $sig.SignerCertificate.Subject }} else {{ '' }}
+    Root = $rootSubject
+    RootThumbprint = $rootThumbprint
+    ChainValid = $chainOk
+}} | ConvertTo-Json -Compress
+"""
+            result = subprocess.run(
+                [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() or result.stdout.strip() or "Signature check failed"
+                return False, error_msg
+
+            signature_info = json.loads(result.stdout.strip() or "{}")
+            if signature_info_is_valid_microsoft(signature_info):
+                root = signature_info.get("Root", "Microsoft root")
+                return True, f"{signature_info.get('Status', 'Valid')} signature via {root}"
+
+            status = signature_info.get("Status", "Unknown")
+            signer = signature_info.get("Signer", "unknown signer") or "unknown signer"
+            root = signature_info.get("Root", "unknown root") or "unknown root"
+            return False, f"{status} signature from {signer} via {root}"
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
     def get_installed_package_version(package_name):
         try:
             safe_name = package_name.replace("'", "''")
@@ -350,7 +417,7 @@ class StoreAPI:
                 "Select-Object -First 1 -ExpandProperty Version"
             )
             result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", cmd],
+                [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
                 capture_output=True,
                 text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW
@@ -396,7 +463,7 @@ class StoreAPI:
                 if 'RunDll32' in cmd:
                     subprocess.run(cmd, shell=True, timeout=15)
                 else:
-                    subprocess.run(["powershell", "-NoProfile", "-Command", cmd], creationflags=subprocess.CREATE_NO_WINDOW, timeout=30)
+                    subprocess.run([POWERSHELL_EXE, "-NoProfile", "-Command", cmd], creationflags=subprocess.CREATE_NO_WINDOW, timeout=30)
                 results.append((desc, True))
             except:
                 results.append((desc, False))
@@ -1345,6 +1412,15 @@ Fixes "needs to be online" and similar errors.
                     self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Up to date", text_color=Theme.SUCCESS))
                 self.after(0, lambda n=package_name, i=installed_version, a=available_version: self._log("SUCCESS", f"  Skipped {n}: installed {i} >= available {a}"))
                 continue
+
+            signature_ok, signature_msg = StoreAPI.verify_package_signature(filepath)
+            if not signature_ok:
+                if '_status_widget' in pkg:
+                    self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Signature blocked", text_color=Theme.DANGER))
+                self.after(0, lambda n=fname, m=signature_msg: self._log("ERROR", f"  Signature verification blocked {n}: {m}"))
+                continue
+
+            self.after(0, lambda m=signature_msg: self._log("DEBUG", f"  Signature verified: {m}"))
             
             success, error_msg = StoreAPI.install_package(filepath)
             

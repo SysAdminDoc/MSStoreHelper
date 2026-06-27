@@ -147,6 +147,18 @@ def installed_version_satisfies_package(package, installed_version):
     return compare_version_tuples(installed, available) >= 0
 
 
+def signature_info_is_valid_microsoft(signature_info):
+    status = str(signature_info.get("Status", "")).lower()
+    signer = str(signature_info.get("Signer", "")).lower()
+    root = str(signature_info.get("Root", "")).lower()
+    status_valid = status in {"valid", "0"}
+
+    if not status_valid:
+        return False
+
+    return "microsoft" in root or "microsoft corporation" in signer
+
+
 def _candidate_score(package, target_arch, prefer_exact_arch=False):
     arch = package_architecture(package)
     if prefer_exact_arch:

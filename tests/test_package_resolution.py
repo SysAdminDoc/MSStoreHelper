@@ -9,6 +9,7 @@ from msstore_package_resolution import (
     package_role,
     package_version_tuple,
     select_recommended_packages,
+    signature_info_is_valid_microsoft,
     version_tuple_from_text,
 )
 
@@ -99,6 +100,26 @@ class PackageResolutionTests(unittest.TestCase):
         self.assertEqual(package_version_tuple(candidate["FileName"]), ())
         self.assertEqual(version_tuple_from_text("Version: 1.2.3.4"), (1, 2, 3, 4))
         self.assertFalse(installed_version_satisfies_package(candidate, "9.9.9.9"))
+
+    def test_signature_info_requires_valid_microsoft_signature(self):
+        self.assertTrue(signature_info_is_valid_microsoft({
+            "Status": "Valid",
+            "ChainValid": False,
+            "Signer": "CN=Microsoft Corporation",
+            "Root": "CN=Microsoft Root Certificate Authority 2011",
+        }))
+        self.assertFalse(signature_info_is_valid_microsoft({
+            "Status": "Valid",
+            "ChainValid": True,
+            "Signer": "CN=Contoso",
+            "Root": "CN=Contoso Root",
+        }))
+        self.assertFalse(signature_info_is_valid_microsoft({
+            "Status": "HashMismatch",
+            "ChainValid": True,
+            "Signer": "CN=Microsoft Corporation",
+            "Root": "CN=Microsoft Root Certificate Authority 2011",
+        }))
 
 
 if __name__ == "__main__":
