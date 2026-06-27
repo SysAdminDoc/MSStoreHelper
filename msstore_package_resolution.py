@@ -115,8 +115,36 @@ def package_version_tuple(filename):
 
     matches = re.findall(r"\d+(?:\.\d+){1,4}", stem)
     if not matches:
-        return (0,)
+        return ()
     return tuple(int(piece) for piece in matches[-1].split("."))
+
+
+def version_tuple_from_text(text):
+    match = re.search(r"\d+(?:\.\d+){1,4}", str(text or ""))
+    if not match:
+        return ()
+    return tuple(int(piece) for piece in match.group(0).split("."))
+
+
+def format_version_tuple(version_tuple):
+    return ".".join(str(piece) for piece in version_tuple) if version_tuple else "unknown"
+
+
+def compare_version_tuples(left, right):
+    width = max(len(left), len(right))
+    padded_left = tuple(left) + (0,) * (width - len(left))
+    padded_right = tuple(right) + (0,) * (width - len(right))
+    if padded_left == padded_right:
+        return 0
+    return 1 if padded_left > padded_right else -1
+
+
+def installed_version_satisfies_package(package, installed_version):
+    available = package_version_tuple(package["FileName"])
+    installed = version_tuple_from_text(installed_version)
+    if not installed or not available:
+        return False
+    return compare_version_tuples(installed, available) >= 0
 
 
 def _candidate_score(package, target_arch):
@@ -166,4 +194,6 @@ def annotate_package(package):
     package["PackageRole"] = role
     package["PackageRoleLabel"] = ROLE_LABELS.get(role, "App")
     package["InstallOrder"] = ROLE_ORDER.get(role, ROLE_ORDER["app"])
+    package["PackageIdentity"] = package_identity(package["FileName"])
+    package["AvailableVersion"] = format_version_tuple(package_version_tuple(package["FileName"]))
     return package

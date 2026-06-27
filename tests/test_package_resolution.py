@@ -3,11 +3,13 @@
 import unittest
 
 from msstore_package_resolution import (
+    installed_version_satisfies_package,
     is_dependency_package,
     order_packages_for_install,
     package_role,
     package_version_tuple,
     select_recommended_packages,
+    version_tuple_from_text,
 )
 
 
@@ -72,6 +74,20 @@ class PackageResolutionTests(unittest.TestCase):
         )
         self.assertTrue(is_dependency_package(ordered[0]))
         self.assertEqual(package_version_tuple(ordered[-1]["FileName"]), (5, 0, 0, 0))
+
+    def test_installed_version_satisfies_package(self):
+        candidate = package("Contoso.App_2.5.0.0_x64__8wekyb3d8bbwe.Msix")
+
+        self.assertTrue(installed_version_satisfies_package(candidate, "2.5.0.0"))
+        self.assertTrue(installed_version_satisfies_package(candidate, "3.0.0.0"))
+        self.assertFalse(installed_version_satisfies_package(candidate, "2.4.9.0"))
+
+    def test_unknown_available_version_is_not_current(self):
+        candidate = package("Contoso.App_x64__8wekyb3d8bbwe.Msix")
+
+        self.assertEqual(package_version_tuple(candidate["FileName"]), ())
+        self.assertEqual(version_tuple_from_text("Version: 1.2.3.4"), (1, 2, 3, 4))
+        self.assertFalse(installed_version_satisfies_package(candidate, "9.9.9.9"))
 
 
 if __name__ == "__main__":

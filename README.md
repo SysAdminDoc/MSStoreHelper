@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.3.0-blue)
+![Version](https://img.shields.io/badge/version-3.4.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -20,6 +20,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 📂 **Browse Categories** - Quick access to essential apps, gaming, productivity, dev tools & more
 - ⚡ **Quick Fix Presets** - One-click solutions for common needs (Repair Store, Gaming Setup, Media Codecs)
 - ✨ **Smart Select** - Automatically picks the best packages and dependency frameworks (bundles, correct architecture, newest versions)
+- ⏭️ **Delta Detection** - Skips packages when the same or newer version is already installed
 - 📥 **Download Queue** - Queue multiple packages with progress tracking
 - 📦 **Install Packages** - Install downloaded apps directly (requires Admin)
 - 🔧 **Store Repair** - Built-in repair tool for Microsoft Store connectivity issues
@@ -109,7 +110,7 @@ If you see errors like "The server stumbled" or "needs to be online":
 | Error Code | Meaning | Solution |
 |------------|---------|----------|
 | `0x80073CFD` | App requires newer Windows | App incompatible - try older version |
-| `0x80073D06` | Higher version installed | No action needed - you have a newer version |
+| `0x80073D06` | Higher version installed | Treated as a no-op; you already have a newer version |
 | `0x80073D02` | Package in use | Close the app and retry |
 | `0x80073D19` | Missing dependency | Install VCLibs/.NET first |
 | `0x80073CFF` | Sideloading disabled | Enable Developer Mode in Windows Settings |
@@ -154,7 +155,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.3.0"
+APP_VERSION = "3.4.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 

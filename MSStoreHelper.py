@@ -15,8 +15,12 @@ import webbrowser
 from datetime import datetime
 from msstore_package_resolution import (
     annotate_package,
+    format_version_tuple,
+    installed_version_satisfies_package,
     is_dependency_package,
     order_packages_for_install,
+    package_identity,
+    package_version_tuple,
     package_role_label,
     select_recommended_packages,
 )
@@ -55,7 +59,7 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.3.0"
+APP_VERSION = "3.4.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -335,6 +339,41 @@ class StoreAPI:
             return True, "Installed successfully"
         except Exception as e:
             return False, str(e)
+
+    @staticmethod
+    def get_installed_package_version(package_name):
+        try:
+            safe_name = package_name.replace("'", "''")
+            cmd = (
+                f"Get-AppxPackage -Name '{safe_name}' | "
+                "Sort-Object -Property Version -Descending | "
+                "Select-Object -First 1 -ExpandProperty Version"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", cmd],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            if result.returncode != 0:
+                return None
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            return lines[-1] if lines else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def should_skip_installed_package(package):
+        package_name = package.get("PackageIdentity") or package_identity(package["FileName"])
+        installed_version = StoreAPI.get_installed_package_version(package_name)
+        if not installed_version:
+            return False, installed_version, package_name
+        return installed_version_satisfies_package(package, installed_version), installed_version, package_name
+
+    @staticmethod
+    def is_noop_install_error(error_msg):
+        error_lower = error_msg.lower()
+        return "0x80073d06" in error_lower or "higher version" in error_lower
     
     @staticmethod
     def run_repair(log_callback=None, progress_callback=None):
@@ -1248,11 +1287,14 @@ Fixes "needs to be online" and similar errors.
         self.after(0, lambda: self._log("INFO", "Note: Install order matters - dependencies should be installed first"))
         
         success_count = 0
+        skipped_count = 0
         total = len(packages)
         
         for i, pkg in enumerate(packages):
             fname = pkg['FileName']
             filepath = pkg['LocalPath']
+            package_name = pkg.get("PackageIdentity") or package_identity(fname)
+            available_version = pkg.get("AvailableVersion") or format_version_tuple(package_version_tuple(fname))
             
             self.after(0, lambda n=fname: self._update_status(f"📦 Installing {n[:40]}...", Theme.INFO))
             self.after(0, lambda n=fname, idx=i+1, tot=total: self._log("INFO", f"[{idx}/{tot}] Installing: {n}"))
@@ -1260,6 +1302,14 @@ Fixes "needs to be online" and similar errors.
             
             if '_status_widget' in pkg:
                 self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Installing...", text_color=Theme.INFO))
+
+            should_skip, installed_version, package_name = StoreAPI.should_skip_installed_package(pkg)
+            if should_skip:
+                skipped_count += 1
+                if '_status_widget' in pkg:
+                    self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Up to date", text_color=Theme.SUCCESS))
+                self.after(0, lambda n=package_name, i=installed_version, a=available_version: self._log("SUCCESS", f"  Skipped {n}: installed {i} >= available {a}"))
+                continue
             
             success, error_msg = StoreAPI.install_package(filepath)
             
@@ -1269,6 +1319,12 @@ Fixes "needs to be online" and similar errors.
                     self.after(0, lambda n=fname: self._log("SUCCESS", f"  Successfully installed: {n}"))
                     success_count += 1
                 else:
+                    if StoreAPI.is_noop_install_error(error_msg):
+                        skipped_count += 1
+                        self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Already current", text_color=Theme.SUCCESS))
+                        self.after(0, lambda n=package_name: self._log("SUCCESS", f"  No-op for {n}: installed version is already newer"))
+                        continue
+
                     self.after(0, lambda w=pkg['_status_widget']: w.configure(text="❌ Error", text_color=Theme.DANGER))
                     self.after(0, lambda n=fname: self._log("ERROR", f"  Failed to install: {n}"))
                     
@@ -1298,10 +1354,12 @@ Fixes "needs to be online" and similar errors.
         
         self.after(0, lambda: self._update_status("✅ Installation complete!", Theme.SUCCESS))
         
-        if success_count == total:
-            self.after(0, lambda: self._log("SUCCESS", f"Installation complete: All {total} packages installed successfully"))
+        completed_count = success_count + skipped_count
+
+        if completed_count == total:
+            self.after(0, lambda: self._log("SUCCESS", f"Installation complete: {success_count} installed, {skipped_count} skipped/no-op"))
         else:
-            self.after(0, lambda: self._log("WARNING", f"Installation complete: {success_count}/{total} packages installed"))
+            self.after(0, lambda: self._log("WARNING", f"Installation complete: {success_count} installed, {skipped_count} skipped/no-op, {total - completed_count} failed"))
             self.after(0, lambda: self._log("INFO", "Tip: Check the errors above. Common fixes:"))
             self.after(0, lambda: self._log("INFO", "  1. Install dependencies (VCLibs, .NET) before main apps"))
             self.after(0, lambda: self._log("INFO", "  2. Enable Developer Mode in Windows Settings"))
