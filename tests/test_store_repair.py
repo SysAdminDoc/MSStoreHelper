@@ -20,6 +20,19 @@ class StoreRepairTests(unittest.TestCase):
         self.assertIn("LicenseManager", commands)
         self.assertIn("Microsoft.StorePurchaseApp", commands)
 
+    def test_provisioning_repair_steps_clear_deprovisioned_store_keys(self):
+        steps = StoreAPI.get_provisioning_repair_steps()
+        descriptions = "\n".join(description for description, _command in steps)
+        commands = "\n".join(command for _description, command in steps)
+
+        self.assertIn("Clearing Store deprovision tombstones", descriptions)
+        self.assertIn("Re-registering Store apps", descriptions)
+        self.assertIn("AppxAllUserStore\\Deprovisioned", commands)
+        self.assertIn("Microsoft.WindowsStore", commands)
+        self.assertIn("Microsoft.StorePurchaseApp", commands)
+        self.assertIn("Microsoft.DesktopAppInstaller", commands)
+        self.assertIn("Add-AppxPackage", commands)
+
 
 if __name__ == "__main__":
     unittest.main()
