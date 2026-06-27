@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.2.0-blue)
+![Version](https://img.shields.io/badge/version-3.3.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -19,7 +19,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 🔍 **Search the Microsoft Store** - Find any app by name using the official Microsoft API
 - 📂 **Browse Categories** - Quick access to essential apps, gaming, productivity, dev tools & more
 - ⚡ **Quick Fix Presets** - One-click solutions for common needs (Repair Store, Gaming Setup, Media Codecs)
-- ✨ **Smart Select** - Automatically picks the best packages (bundles, correct architecture, newest versions)
+- ✨ **Smart Select** - Automatically picks the best packages and dependency frameworks (bundles, correct architecture, newest versions)
 - 📥 **Download Queue** - Queue multiple packages with progress tracking
 - 📦 **Install Packages** - Install downloaded apps directly (requires Admin)
 - 🔧 **Store Repair** - Built-in repair tool for Microsoft Store connectivity issues
@@ -37,7 +37,6 @@ Dependencies are auto-installed on first run:
 - `customtkinter` - Modern UI framework
 - `requests` - HTTP client
 - `beautifulsoup4` - HTML parsing
-- `packaging` - Version comparison
 
 ---
 
@@ -99,7 +98,7 @@ If you see errors like "The server stumbled" or "needs to be online":
 |-----|-------------|
 | **Use Bundles** | Files ending in `.msixbundle` or `.appxbundle` work on all architectures |
 | **Avoid Encrypted** | Skip `.eappx` and `.emsix` files - they won't install without a license |
-| **Install Dependencies First** | Install VCLibs and .NET packages before main apps |
+| **Install Dependencies First** | Smart Select queues VCLibs, .NET Native, and UI.Xaml before main apps |
 | **Check Windows Version** | Some apps require Windows 11 - check the console for compatibility errors |
 | **Smart Select** | Let the tool pick the best packages automatically |
 
@@ -138,14 +137,14 @@ Packages are downloaded to `%USERPROFILE%\Downloads\MSStoreHelper` and installed
 
 ```
 MSStoreHelper/
-├── MSStoreHelper.py    # Main application
-├── README.md           # This file
-├── LICENSE             # MIT License
-└── screenshots/        # Screenshots for README
-    ├── main.png
-    ├── search.png
-    ├── packages.png
-    └── console.png
+├── MSStoreHelper.py               # Main application
+├── msstore_package_resolution.py  # Package selection and install ordering
+├── tests/
+│   └── test_package_resolution.py # Resolver tests
+├── README.md                      # This file
+├── LICENSE                        # MIT License
+├── icon.png / icon.ico            # App icon assets
+└── screenshot.png                 # README screenshot
 ```
 
 ---
@@ -155,7 +154,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.2.0"
+APP_VERSION = "3.3.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 

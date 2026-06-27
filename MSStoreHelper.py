@@ -10,10 +10,16 @@ import subprocess
 import os
 import platform
 import threading
-import re
 import ctypes
 import webbrowser
 from datetime import datetime
+from msstore_package_resolution import (
+    annotate_package,
+    is_dependency_package,
+    order_packages_for_install,
+    package_role_label,
+    select_recommended_packages,
+)
 
 # ==================== DEPENDENCY AUTO-INSTALL ====================
 def install_requirements():
@@ -21,7 +27,6 @@ def install_requirements():
         'customtkinter': 'customtkinter',
         'requests': 'requests',
         'bs4': 'beautifulsoup4',
-        'packaging': 'packaging'
     }
     missing = []
     
@@ -42,17 +47,15 @@ try:
     import customtkinter as ctk
     import requests
     from bs4 import BeautifulSoup
-    from packaging import version
 except ImportError:
     install_requirements()
     import customtkinter as ctk
     import requests
     from bs4 import BeautifulSoup
-    from packaging import version
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.1.2"
+APP_VERSION = "3.3.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -116,19 +119,6 @@ def format_size(size_bytes):
             return f"{size_bytes:.1f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.1f} TB"
-
-def extract_version(filename):
-    match = re.search(r'[\._](\d+(?:\.\d+){1,4})[\._]', filename)
-    if match:
-        try:
-            return version.parse(match.group(1))
-        except:
-            return version.parse("0")
-    return version.parse("0")
-
-def extract_package_name(filename):
-    name = re.sub(r'[\._]\d+(?:\.\d+){1,4}[\._].*', '', filename)
-    return name
 
 # ==================== APP CATALOG ====================
 
@@ -278,11 +268,12 @@ class StoreAPI:
                 is_bundle = "BUNDLE" in ext
                 is_encrypted = ext.startswith("E")
                 
-                results.append({
+                package = {
                     "FileName": name, "Url": url, "Architecture": arch,
                     "FileType": ext, "IsBundle": is_bundle, "IsEncrypted": is_encrypted,
                     "SizeBytes": None, "SizeStr": "—"
-                })
+                }
+                results.append(annotate_package(package))
             
             return results
             
@@ -302,36 +293,11 @@ class StoreAPI:
     @staticmethod
     def smart_select(packages, target_arch):
         """Intelligently select the best packages"""
-        selected = []
-        seen = {}
-        
-        sorted_pkgs = sorted(packages, key=lambda p: (
-            p.get('IsBundle', False),
-            not p.get('IsEncrypted', False),
-            extract_version(p['FileName'])
-        ), reverse=True)
-        
-        for pkg in sorted_pkgs:
-            if pkg.get('IsEncrypted'):
-                continue
-            
-            base = extract_package_name(pkg['FileName'])
-            arch = pkg['Architecture']
-            is_bundle = pkg.get('IsBundle', False)
-            
-            if is_bundle:
-                if base not in seen:
-                    seen[base] = pkg
-                    selected.append(pkg)
-            else:
-                if arch not in [target_arch, 'neutral']:
-                    continue
-                key = f"{base}_{arch}"
-                if key not in seen and base not in seen:
-                    seen[key] = pkg
-                    selected.append(pkg)
-        
-        return selected
+        return select_recommended_packages(packages, target_arch)
+
+    @staticmethod
+    def order_packages_for_install(packages, target_arch):
+        return order_packages_for_install(packages, target_arch)
     
     @staticmethod
     def download_file(url, filepath, progress_callback=None):
@@ -493,6 +459,10 @@ class PackageRow(ctk.CTkFrame):
         arch = pkg_data.get('Architecture', 'neutral')
         arch_color = Theme.ARCH_MATCH if arch in [SYSTEM_ARCH, 'neutral'] else Theme.TEXT_MUTED
         ctk.CTkLabel(tags_frame, text=f" {arch} ", font=("Consolas", 10), text_color=arch_color).pack(side="left", padx=(0, 6))
+
+        if is_dependency_package(pkg_data):
+            role_label = pkg_data.get('PackageRoleLabel') or package_role_label(pkg_data['FileName'])
+            ctk.CTkLabel(tags_frame, text=role_label, font=("Segoe UI", 10), text_color=Theme.INFO).pack(side="left", padx=(0, 6))
         
         if pkg_data.get('IsEncrypted'):
             ctk.CTkLabel(tags_frame, text="⚠️ Encrypted", font=("Segoe UI", 10), text_color=Theme.WARNING).pack(side="left")
@@ -524,6 +494,10 @@ class QueueItem(ctk.CTkFrame):
         
         ctk.CTkLabel(info_frame, text=pkg_info.get('SizeStr', '—'), font=("Consolas", 10), text_color=Theme.INFO).pack(side="left")
         
+        if is_dependency_package(pkg_info):
+            role_label = pkg_info.get('PackageRoleLabel') or package_role_label(pkg_info['FileName'])
+            ctk.CTkLabel(info_frame, text=role_label, font=("Segoe UI", 10), text_color=Theme.WARNING).pack(side="left", padx=(8, 0))
+
         self.status_lbl = ctk.CTkLabel(info_frame, text="Waiting", font=("Segoe UI", 10), text_color=Theme.TEXT_MUTED)
         self.status_lbl.pack(side="right")
         
@@ -1181,12 +1155,17 @@ Fixes "needs to be online" and similar errors.
         for pkg in self.current_packages:
             if pkg['FileName'] in self.selected_packages:
                 if not any(q['FileName'] == pkg['FileName'] for q in self.download_queue):
-                    self.download_queue.append(pkg.copy())
+                    self.download_queue.append(annotate_package(pkg.copy()))
                     count += 1
-        
+
+        self.download_queue = StoreAPI.order_packages_for_install(self.download_queue, SYSTEM_ARCH)
+        dependency_count = sum(1 for pkg in self.download_queue if is_dependency_package(pkg))
+
         self._update_queue_ui()
         self._update_status(f"✅ Added {count} files to queue", Theme.SUCCESS)
         self._log("INFO", f"Added {count} files to download queue (total: {len(self.download_queue)})")
+        if dependency_count:
+            self._log("INFO", f"Install order resolved: {dependency_count} dependency package(s) before apps")
     
     def _update_queue_ui(self):
         for widget in self.queue_scroll.winfo_children():
@@ -1257,6 +1236,7 @@ Fixes "needs to be online" and similar errors.
             return
         
         to_install = [p for p in self.download_queue if p.get('LocalPath') and os.path.exists(p.get('LocalPath', ''))]
+        to_install = StoreAPI.order_packages_for_install(to_install, SYSTEM_ARCH)
         if not to_install:
             self._update_status("⚠️ No downloaded files", Theme.WARNING)
             return
