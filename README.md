@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.14.0-blue)
+![Version](https://img.shields.io/badge/version-3.15.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -16,6 +16,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 🔍 **Search the Microsoft Store** - Find any app by name using the official Microsoft API
 - 📂 **Browse Categories** - Quick access to essential apps, gaming, productivity, dev tools & more
 - ⚡ **Quick Fix Presets** - One-click solutions for common needs (Repair Store, Gaming Setup, Media Codecs)
+- 🧰 **LTSC Essentials** - One-click preset for Terminal, PowerShell 7, WSL, Photos, Calculator, and Snipping Tool
 - ✨ **Smart Select** - Automatically picks the best packages and dependency frameworks (bundles, correct architecture, newest versions)
 - ⏭️ **Delta Detection** - Skips packages when the same or newer version is already installed
 - 🧭 **Architecture Override** - Force x64, x86, ARM64, ARM, or neutral package selection when needed
@@ -174,7 +175,8 @@ MSStoreHelper/
 │   ├── test_offline_cache.py      # Shared cache tests
 │   ├── test_dism_export.py        # DISM export tests
 │   ├── test_winget_export.py      # WinGet manifest tests
-│   └── test_intune_export.py      # IntuneWin package tests
+│   ├── test_intune_export.py      # IntuneWin package tests
+│   └── test_ltsc_workflow.py      # LTSC preset tests
 ├── README.md                      # This file
 ├── LICENSE                        # MIT License
 ├── icon.png / icon.ico            # App icon assets
@@ -188,7 +190,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.14.0"
+APP_VERSION = "3.15.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 

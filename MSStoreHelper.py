@@ -65,7 +65,7 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.14.0"
+APP_VERSION = "3.15.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -207,6 +207,10 @@ APP_CATALOG = {
 }
 
 QUICK_FIX_PRESETS = {
+    "🧰 LTSC Essentials": {
+        "description": "Queue core apps commonly missing on LTSC: Terminal, PowerShell, WSL, Photos, Calculator, and Snipping Tool.",
+        "apps": ["Windows Terminal", "PowerShell 7", "WSL", "Photos", "Calculator", "Snipping Tool"]
+    },
     "🏪 Repair Store": {
         "description": "Reinstall Microsoft Store and essential components to fix most Store-related issues.",
         "apps": ["Microsoft Store", "App Installer", "VC++ Runtime"]
