@@ -2,15 +2,12 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.11.0-blue)
+![Version](https://img.shields.io/badge/version-3.12.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
 
 ---
-
-<img width="1602" height="1039" alt="2026-01-24 20_16_53-📦 MSStoreHelper v3 1 0" src="https://github.com/user-attachments/assets/f1318c15-a736-442f-9a26-b00f972503a1" />
-
 
 ![Screenshot](screenshot.png)
 
@@ -30,6 +27,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 🔐 **Licensing Reset** - Restarts ClipSVC/LicenseManager and refreshes Store purchase licensing
 - 🧹 **Cache Rebuild** - Scans, backs up, and recreates Store cache folders offline
 - 🗂️ **Shared Offline Cache** - Mirrors downloaded AppX/MSIX artifacts to a shared folder for air-gapped reuse
+- 🧾 **DISM Provisioning Export** - Generates fleet-ready PowerShell scripts that call DISM for queued packages
 - 📋 **Verbose Console** - Detailed logging with error hints and troubleshooting tips
 
 ---
@@ -83,6 +81,13 @@ python MSStoreHelper.py
 4. Click **"➕ Add to Queue"** to add selected packages to the download queue
 5. Optional: enable **Shared cache** and pick a shared folder for air-gapped reuse
 6. Click **"⬇️ Download All"** to start downloading
+
+### 🧾 Fleet Provisioning
+
+1. Add the packages and dependencies you want to deploy to the download queue
+2. Click **"🧾 Export DISM Script"**
+3. Save the generated `.ps1` beside the downloaded packages or in your shared cache
+4. Run the script from an elevated PowerShell session on the target PC
 
 ### 📦 Installing Packages
 
@@ -148,7 +153,10 @@ MSStoreHelper/
 ├── MSStoreHelper.py               # Main application
 ├── msstore_package_resolution.py  # Package selection and install ordering
 ├── tests/
-│   └── test_package_resolution.py # Resolver tests
+│   ├── test_package_resolution.py # Resolver tests
+│   ├── test_store_repair.py       # Store repair tests
+│   ├── test_offline_cache.py      # Shared cache tests
+│   └── test_dism_export.py        # DISM export tests
 ├── README.md                      # This file
 ├── LICENSE                        # MIT License
 ├── icon.png / icon.ico            # App icon assets
@@ -162,7 +170,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.11.0"
+APP_VERSION = "3.12.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 
