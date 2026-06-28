@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.24.0-blue)
+![Version](https://img.shields.io/badge/version-3.25.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -204,6 +204,7 @@ MSStoreHelper/
 │   ├── test_dism_export.py        # DISM export tests
 │   ├── test_winget_export.py      # WinGet manifest tests
 │   ├── test_diagnostics_bundle.py # Diagnostics ZIP tests
+│   ├── test_integration_harness.py # Mocked Store/PowerShell workflow tests
 │   ├── test_intune_export.py      # IntuneWin package tests
 │   ├── test_ltsc_workflow.py      # LTSC preset tests
 │   ├── test_user_profile.py       # Search history and favorites tests
@@ -223,7 +224,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.24.0"
+APP_VERSION = "3.25.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 

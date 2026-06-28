@@ -2,6 +2,11 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.25.0] - 2026-06-28
+
+- Added a mocked integration harness for StoreEdgeFD search, RG-Adguard package parsing, failed downloads, signature failures, Appx install failures, and IntuneWin command failures.
+- Changed test coverage to exercise Store and PowerShell workflow failures without network, admin rights, or external tools.
+
 ## [v3.24.0] - 2026-06-28
 
 - Added a redacted diagnostics ZIP export with app version, Windows/Python details, source health, queue metadata, app logs, PowerShell transcript lines, and recent repair manifests.

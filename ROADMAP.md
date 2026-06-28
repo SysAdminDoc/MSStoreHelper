@@ -48,13 +48,6 @@ GUI tool to download/install Microsoft Store apps without the Store UI. Planned 
 
 ## Research-Driven Additions
 
-- [ ] P1 - Mocked integration harness for Store and PowerShell workflows
-  Why: Existing tests cover pure functions and script text, but not endpoint parser drift or full download/install/export failure paths.
-  Evidence: `tests/`, `StoreAPI.get_packages`, `StoreAPI.install_package`, `StoreAPI.create_intunewin_package`.
-  Touches: tests, fixture HTML/JSON, PowerShell runner abstraction, download worker seams.
-  Acceptance: local tests simulate StoreEdgeFD/RG-Adguard responses, failed downloads, signature failures, Appx install return codes, and IntuneWin command failures without network/admin rights.
-  Complexity: L
-
 - [ ] P2 - Accessibility, DPI, and keyboardless GUI audit
   Why: Dense CustomTkinter rows use fixed widths/wrap lengths and emoji-heavy labels that can clip or degrade on high DPI/theme changes.
   Evidence: `MSStoreHelper.py:1356`, `MSStoreHelper.py:1415`, `MSStoreHelper.py:1534`, `tests/test_theme.py`, README screenshot.
