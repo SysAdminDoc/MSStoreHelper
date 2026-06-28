@@ -88,7 +88,7 @@ from bs4 import BeautifulSoup
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.25.0"
+APP_VERSION = "3.26.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -152,6 +152,7 @@ class Theme:
     # Accent colors
     PRIMARY = DEFAULT_ACCENT
     PRIMARY_HOVER = ("#4f46e5", "#818cf8")
+    PRIMARY_OUTLINE_TEXT = ("#4338ca", "#c4b5fd")
     SUCCESS = ("#059669", "#10b981")
     SUCCESS_HOVER = ("#047857", "#34d399")
     WARNING = ("#b45309", "#f59e0b")
@@ -195,6 +196,32 @@ class Theme:
             else:
                 shifted.append(round(channel * (1 + amount)))
         return "#" + "".join(f"{channel:02x}" for channel in shifted)
+
+    @staticmethod
+    def color_for_mode(color, mode="Dark"):
+        if isinstance(color, (tuple, list)) and len(color) >= 2:
+            return color[0] if Theme.resolve_mode(mode, apps_use_light=False) == "Light" else color[1]
+        return color
+
+    @staticmethod
+    def relative_luminance(color):
+        value = Theme.sanitize_hex_color(color) or Theme.DEFAULT_ACCENT
+        channels = [int(value[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        linear = []
+        for channel in channels:
+            if channel <= 0.03928:
+                linear.append(channel / 12.92)
+            else:
+                linear.append(((channel + 0.055) / 1.055) ** 2.4)
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    @staticmethod
+    def contrast_ratio(foreground, background):
+        fg = Theme.relative_luminance(foreground)
+        bg = Theme.relative_luminance(background)
+        lighter = max(fg, bg)
+        darker = min(fg, bg)
+        return (lighter + 0.05) / (darker + 0.05)
 
     @staticmethod
     def accent_from_windows_dword(value):
@@ -1963,7 +1990,8 @@ class MSStoreHelperApp(ctk.CTk):
         
         self._build_ui()
         self._show_welcome()
-        threading.Thread(target=self._source_health_worker, daemon=True).start()
+        if os.environ.get("MSSTOREHELPER_SKIP_SOURCE_HEALTH") != "1":
+            threading.Thread(target=self._source_health_worker, daemon=True).start()
 
     def _target_arch(self):
         choice = self.arch_override_var.get()
@@ -2343,29 +2371,29 @@ class MSStoreHelperApp(ctk.CTk):
         center.place(relx=0.5, rely=0.5, anchor="center")
         
         card = ModernCard(center)
-        card.pack(padx=40, pady=40)
+        card.pack(padx=20, pady=30)
         
         inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(padx=50, pady=40)
+        inner.pack(padx=32, pady=32)
         
-        ctk.CTkLabel(inner, text="👋", font=("Segoe UI Emoji", 48)).pack(pady=(0, 10))
-        ctk.CTkLabel(inner, text="Welcome to MSStoreHelper", font=("Segoe UI Semibold", 24)).pack()
-        ctk.CTkLabel(inner, text="Download and install Microsoft Store apps\nwithout needing access to the Store", font=("Segoe UI", 14), text_color=Theme.TEXT_SECONDARY, justify="center").pack(pady=(10, 25))
+        ctk.CTkLabel(inner, text="👋", font=("Segoe UI Emoji", 42)).pack(pady=(0, 8))
+        ctk.CTkLabel(inner, text="Welcome to MSStoreHelper", font=("Segoe UI Semibold", 22), wraplength=520).pack()
+        ctk.CTkLabel(inner, text="Download and install Microsoft Store apps\nwithout needing access to the Store", font=("Segoe UI", 13), text_color=Theme.TEXT_SECONDARY, justify="center", wraplength=520).pack(pady=(10, 22))
         
         options = ctk.CTkFrame(inner, fg_color="transparent")
         options.pack()
         
-        ctk.CTkButton(options, text="🔍 Search for an App", width=200, height=45, font=("Segoe UI Semibold", 14), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=lambda: self.search_entry.focus()).pack(side="left", padx=10)
-        ctk.CTkButton(options, text="📂 Browse Categories", width=200, height=45, font=("Segoe UI Semibold", 14), fg_color="transparent", border_width=2, border_color=Theme.PRIMARY, hover_color=Theme.BG_CARD_HOVER, command=lambda: self._show_category("🛠️ Essential Repairs")).pack(side="left", padx=10)
+        ctk.CTkButton(options, text="🔍 Search", width=160, height=42, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=lambda: self.search_entry.focus()).pack(side="left", padx=8)
+        ctk.CTkButton(options, text="📂 Categories", width=160, height=42, font=("Segoe UI Semibold", 13), fg_color="transparent", border_width=2, border_color=Theme.PRIMARY, text_color=Theme.PRIMARY_OUTLINE_TEXT, hover_color=Theme.BG_CARD_HOVER, command=lambda: self._show_category("🛠️ Essential Repairs")).pack(side="left", padx=8)
         
         tips = ctk.CTkFrame(inner, fg_color=Theme.BG_INPUT, corner_radius=8)
         tips.pack(fill="x", pady=(30, 0))
         
         tip_inner = ctk.CTkFrame(tips, fg_color="transparent")
-        tip_inner.pack(padx=20, pady=15)
+        tip_inner.pack(padx=18, pady=14)
         
         ctk.CTkLabel(tip_inner, text="💡 Tips", font=("Segoe UI Semibold", 13), anchor="w").pack(fill="x")
-        ctk.CTkLabel(tip_inner, text="• Use 'Smart Select' to automatically pick the best files\n• Bundles (.msixbundle) work on all architectures\n• Run as Administrator for installation to work\n• Use 'Repair Store' if the Store shows connectivity errors", font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY, justify="left", anchor="w").pack(fill="x", pady=(5, 0))
+        ctk.CTkLabel(tip_inner, text="• Use 'Smart Select' to automatically pick the best files\n• Bundles (.msixbundle) work on all architectures\n• Run as Administrator for installation to work\n• Use 'Repair Store' if the Store shows connectivity errors", font=("Segoe UI", 11), text_color=Theme.TEXT_SECONDARY, justify="left", anchor="w", wraplength=500).pack(fill="x", pady=(5, 0))
     
     def _show_category(self, category_name):
         self._clear_content()

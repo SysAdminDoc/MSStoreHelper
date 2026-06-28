@@ -2,6 +2,12 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.26.0] - 2026-06-28
+
+- Added theme contrast helpers and tests for core text, muted text, and outline action states.
+- Changed the welcome screen layout to avoid clipped primary actions at 100, 125, and 150 percent scaling in dark and light themes.
+- Added a deterministic source-health skip hook for GUI smoke captures.
+
 ## [v3.25.0] - 2026-06-28
 
 - Added a mocked integration harness for StoreEdgeFD search, RG-Adguard package parsing, failed downloads, signature failures, Appx install failures, and IntuneWin command failures.

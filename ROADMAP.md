@@ -48,13 +48,6 @@ GUI tool to download/install Microsoft Store apps without the Store UI. Planned 
 
 ## Research-Driven Additions
 
-- [ ] P2 - Accessibility, DPI, and keyboardless GUI audit
-  Why: Dense CustomTkinter rows use fixed widths/wrap lengths and emoji-heavy labels that can clip or degrade on high DPI/theme changes.
-  Evidence: `MSStoreHelper.py:1356`, `MSStoreHelper.py:1415`, `MSStoreHelper.py:1534`, `tests/test_theme.py`, README screenshot.
-  Touches: UI components, theme tokens, screenshot capture, GUI smoke checks.
-  Acceptance: desktop screenshot pass verifies no clipped action buttons or unreadable contrast at 100/125/150 percent scaling in dark and light modes; controls remain usable without documented keyboard shortcuts.
-  Complexity: M
-
 - [ ] P2 - Locale, market, and ring controls
   Why: Package lookup hard-codes `Retail` and `en-US`, limiting non-US admins and Store flight troubleshooting.
   Evidence: `MSStoreHelper.py:561`, K3rhos ring/language selector, Microsoft Store regioned product pages.
