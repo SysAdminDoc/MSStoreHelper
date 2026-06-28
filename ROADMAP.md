@@ -48,13 +48,6 @@ GUI tool to download/install Microsoft Store apps without the Store UI. Planned 
 
 ## Research-Driven Additions
 
-- [ ] P2 - Locale, market, and ring controls
-  Why: Package lookup hard-codes `Retail` and `en-US`, limiting non-US admins and Store flight troubleshooting.
-  Evidence: `MSStoreHelper.py:561`, K3rhos ring/language selector, Microsoft Store regioned product pages.
-  Touches: package fetch UI, user profile settings, Store source adapter, tests for query payloads.
-  Acceptance: user can select ring, language, and market; selections persist per profile; query metadata appears in logs and exported deployment artifacts.
-  Complexity: M
-
 - [ ] P3 - App Installer manifest export
   Why: Microsoft supports `.appinstaller` files with update settings, offering a lightweight distribution path between one-off installs and full Intune packaging.
   Evidence: Microsoft App Installer docs, `Add-AppxPackage -AppInstallerFile`, existing DISM/WinGet/Intune export flows.

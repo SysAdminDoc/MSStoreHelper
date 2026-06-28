@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.26.0-blue)
+![Version](https://img.shields.io/badge/version-3.27.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -28,6 +28,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 🛡️ **Signature Verification** - Blocks installs unless the package signature chains to Microsoft
 - 🔐 **Verified Downloads** - Writes packages atomically and records SHA-256 metadata before cache reuse
 - **Source Health** - Detects StoreEdgeFD, RG-Adguard, WinGet, and Store CLI availability with fallback hints
+- **Store Query Controls** - Persists RG-Adguard ring, Store language, and market for localized package lookup and deployment artifacts
 - **Pinned Python Setup** - Uses `requirements.txt` and package metadata instead of runtime dependency installs
 - **Diagnostics Bundle** - Exports redacted app logs, source health, queue state, and repair manifests as a ZIP
 - **Accessibility Guardrails** - Keeps core theme contrast and the welcome surface usable at 100, 125, and 150 percent scaling
@@ -94,11 +95,12 @@ python MSStoreHelper.py
 
 1. **Search by Name**: Type an app name (e.g., "Spotify", "VLC", "Firefox") and click Search
 2. **Browse Categories**: Click a category in the sidebar to see curated app lists
-3. **Quick Actions**: Use presets for common tasks like LTSC Essentials, Store repair, or gaming setup
-4. **Scan LTSC Gaps**: Click **"🔎 Scan LTSC Gaps"** to detect and queue missing tracked components
-5. **Xbox Core**: Click **"🎮 Queue Xbox Core"** to queue Xbox Identity and Gaming Services through the pinned install path
-6. **Pin Favorites**: Select apps and click **"Pin Selected"** to keep them in the sidebar for this Windows user
-7. **Release Notes**: Click **"Notes"** on an app row to fetch Microsoft Store page notes
+3. **Store Query**: Click **"Query: Retail / en-US / US"** to change RG-Adguard ring, Store language, or market
+4. **Quick Actions**: Use presets for common tasks like LTSC Essentials, Store repair, or gaming setup
+5. **Scan LTSC Gaps**: Click **"🔎 Scan LTSC Gaps"** to detect and queue missing tracked components
+6. **Xbox Core**: Click **"🎮 Queue Xbox Core"** to queue Xbox Identity and Gaming Services through the pinned install path
+7. **Pin Favorites**: Select apps and click **"Pin Selected"** to keep them in the sidebar for this Windows user
+8. **Release Notes**: Click **"Notes"** on an app row to fetch Microsoft Store page notes
 
 ### 📦 Downloading Packages
 
@@ -226,7 +228,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.26.0"
+APP_VERSION = "3.27.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 

@@ -12,7 +12,10 @@ class DismExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             packages = [
                 {"FileName": "Contoso.App_2.0.0.0_x64__test.msixbundle"},
-                {"FileName": "Microsoft.VCLibs.140.00_14.0.33519.0_x64__8wekyb3d8bbwe.appx"},
+                {
+                    "FileName": "Microsoft.VCLibs.140.00_14.0.33519.0_x64__8wekyb3d8bbwe.appx",
+                    "StoreQuery": {"Ring": "RP", "Language": "fr-FR", "Market": "FR"},
+                },
                 {"FileName": "Contoso.App_2.0.0.0_x64__test.BlockMap"},
             ]
 
@@ -25,6 +28,10 @@ class DismExportTests(unittest.TestCase):
                 script.index("Contoso.App_2.0.0.0"),
             )
             self.assertIn("PackagePath = 'Microsoft.VCLibs.140.00_14.0.33519.0_x64__8wekyb3d8bbwe.appx'", script)
+            self.assertIn("StoreRing = 'RP'", script)
+            self.assertIn("StoreLanguage = 'fr-FR'", script)
+            self.assertIn("StoreMarket = 'FR'", script)
+            self.assertIn("from {2}/{3}/{4}", script)
             self.assertNotIn("BlockMap", script)
 
     def test_generate_dism_script_prefers_local_path_and_escapes_values(self):

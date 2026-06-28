@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 
 import unittest
+from unittest.mock import patch
 
 from MSStoreHelper import StoreAPI
+
+
+class FakeResponse:
+    text = "<html><head><title>Localized App</title></head><body></body></html>"
+    url = "https://apps.microsoft.com/detail/contoso?hl=de-DE&gl=DE"
+
+    def raise_for_status(self):
+        return None
 
 
 class ReleaseNotesTests(unittest.TestCase):
@@ -38,6 +47,21 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertEqual(notes["Title"], "Fallback App")
         self.assertEqual(notes["Notes"], "Store description text.")
         self.assertEqual(notes["Source"], "product-description")
+
+    def test_fetch_release_notes_uses_language_and_market(self):
+        captured = {}
+
+        def fake_get(url, **_kwargs):
+            captured["url"] = url
+            return FakeResponse()
+
+        with patch("MSStoreHelper.requests.get", side_effect=fake_get):
+            notes = StoreAPI.fetch_release_notes("contoso", "de-DE", "DE")
+
+        self.assertIn("hl=de-DE", captured["url"])
+        self.assertIn("gl=DE", captured["url"])
+        self.assertEqual(notes["StoreQuery"]["Language"], "de-DE")
+        self.assertEqual(notes["StoreQuery"]["Market"], "DE")
 
 
 if __name__ == "__main__":

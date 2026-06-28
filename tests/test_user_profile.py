@@ -41,6 +41,33 @@ class UserProfileTests(unittest.TestCase):
             self.assertEqual(loaded["SearchHistory"], ["terminal"])
             self.assertEqual(loaded["PinnedFavorites"][0]["ProductId"], "9N0DX20HK701")
 
+    def test_user_profile_round_trips_store_query_settings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_path = os.path.join(temp_dir, "profile.json")
+            profile = StoreAPI.default_user_profile()
+            profile["StoreRing"] = "WIS"
+            profile["StoreLanguage"] = "de-DE"
+            profile["StoreMarket"] = "DE"
+
+            StoreAPI.save_user_profile(profile, profile_path)
+            loaded = StoreAPI.load_user_profile(profile_path)
+
+            self.assertEqual(loaded["StoreRing"], "WIS")
+            self.assertEqual(loaded["StoreLanguage"], "de-DE")
+            self.assertEqual(loaded["StoreMarket"], "DE")
+
+    def test_invalid_store_query_settings_fall_back_to_defaults(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_path = os.path.join(temp_dir, "profile.json")
+            with open(profile_path, "w", encoding="utf-8") as handle:
+                handle.write('{"StoreRing":"Canary","StoreLanguage":"english","StoreMarket":"United States"}')
+
+            loaded = StoreAPI.load_user_profile(profile_path)
+
+            self.assertEqual(loaded["StoreRing"], "Retail")
+            self.assertEqual(loaded["StoreLanguage"], "en-US")
+            self.assertEqual(loaded["StoreMarket"], "US")
+
 
 if __name__ == "__main__":
     unittest.main()

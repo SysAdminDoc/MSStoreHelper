@@ -34,7 +34,12 @@ class DiagnosticsBundleTests(unittest.TestCase):
                 False,
                 temp_dir,
                 [{"Key": "rg-adguard", "Available": False, "Detail": "HTTP 403"}],
-                [{"FileName": os.path.basename(local_path), "LocalPath": local_path, "Sha256": "abc"}],
+                [{
+                    "FileName": os.path.basename(local_path),
+                    "LocalPath": local_path,
+                    "Sha256": "abc",
+                    "StoreQuery": {"Ring": "WIS", "Language": "pt-BR", "Market": "BR"},
+                }],
                 log_text,
             )
 
@@ -52,6 +57,7 @@ class DiagnosticsBundleTests(unittest.TestCase):
 
             self.assertEqual(diagnostics["AppVersion"], "9.9.9")
             self.assertEqual(diagnostics["QueueCount"], 1)
+            self.assertEqual(queue[0]["StoreQuery"]["Language"], "pt-BR")
             self.assertNotIn(temp_dir, json.dumps(queue))
             self.assertNotIn("password=secret", app_log)
             self.assertIn("password=[REDACTED]", app_log)

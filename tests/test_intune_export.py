@@ -22,7 +22,11 @@ class IntuneExportTests(unittest.TestCase):
             info = StoreAPI.prepare_intune_package_source(
                 [
                     {"FileName": os.path.basename(app), "LocalPath": app},
-                    {"FileName": os.path.basename(vclibs), "LocalPath": vclibs},
+                    {
+                        "FileName": os.path.basename(vclibs),
+                        "LocalPath": vclibs,
+                        "StoreQuery": {"Ring": "WIF", "Language": "ja-JP", "Market": "JP"},
+                    },
                 ],
                 staging,
                 downloads,
@@ -39,8 +43,13 @@ class IntuneExportTests(unittest.TestCase):
                 detection_script = handle.read()
             self.assertLess(install_script.index("Microsoft.VCLibs.140.00"), install_script.index("Contoso.App"))
             self.assertIn("/Add-ProvisionedAppxPackage", install_script)
+            self.assertIn("StoreRing = 'WIF'", install_script)
+            self.assertIn("StoreLanguage = 'ja-JP'", install_script)
             self.assertIn("Get-AppxProvisionedPackage", detection_script)
             self.assertIn("Contoso.App", detection_script)
+            with open(info["GuidePath"], encoding="utf-8") as handle:
+                guide = handle.read()
+            self.assertIn("Store query: Retail/en-US/US, WIF/ja-JP/JP", guide)
 
     def test_prepare_intune_package_source_rejects_missing_downloads(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -76,14 +76,24 @@ class StoreSourceTests(unittest.TestCase):
           <tr><td><a href="https://cdn.test/app.BlockMap">Contoso.App_1.2.3.4_x64__abc.BlockMap</a></td></tr>
         </table>
         """
-        with patch("MSStoreHelper.requests.post", return_value=FakeResponse(200, text=html)):
-            diagnostic = StoreAPI.get_packages_with_diagnostics("9TEST")
+        captured = {}
+
+        def fake_post(_url, data=None, **_kwargs):
+            captured["data"] = data
+            return FakeResponse(200, text=html)
+
+        with patch("MSStoreHelper.requests.post", side_effect=fake_post):
+            diagnostic = StoreAPI.get_packages_with_diagnostics("9TEST", "WIF", "de-DE", "DE")
 
         self.assertEqual(diagnostic["Source"], "RG-Adguard package proxy")
         self.assertEqual(diagnostic["Errors"], [])
+        self.assertEqual(captured["data"]["ring"], "WIF")
+        self.assertEqual(captured["data"]["lang"], "de-DE")
+        self.assertEqual(diagnostic["Query"], {"Ring": "WIF", "Language": "de-DE", "Market": "DE", "ProductId": "9TEST"})
         self.assertEqual(len(diagnostic["Packages"]), 1)
         self.assertEqual(diagnostic["Packages"][0]["Architecture"], "x64")
         self.assertEqual(diagnostic["Packages"][0]["FileType"], "MSIXBUNDLE")
+        self.assertEqual(diagnostic["Packages"][0]["StoreQuery"]["Market"], "DE")
 
     def test_package_diagnostics_expose_fallbacks_on_missing_table(self):
         with patch("MSStoreHelper.requests.post", return_value=FakeResponse(200, text="<html></html>")):

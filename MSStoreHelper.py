@@ -88,7 +88,7 @@ from bs4 import BeautifulSoup
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.26.0"
+APP_VERSION = "3.27.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -102,6 +102,9 @@ WINGET_MSSTORE_SOURCE = {
     "Type": "Microsoft.Rest",
 }
 THEME_MODE_VALUES = ["System", "Dark", "Light"]
+STORE_RING_VALUES = ["Retail", "RP", "WIS", "WIF"]
+STORE_LANGUAGE_VALUES = ["en-US", "en-GB", "de-DE", "fr-FR", "es-ES", "it-IT", "ja-JP", "ko-KR", "pt-BR", "zh-CN", "zh-TW"]
+STORE_MARKET_VALUES = ["US", "GB", "CA", "AU", "DE", "FR", "ES", "IT", "JP", "KR", "BR", "CN", "TW"]
 WINDOWS_DIR = os.environ.get("WINDIR", r"C:\Windows")
 WINDOWS_POWERSHELL = os.path.join(WINDOWS_DIR, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 POWERSHELL_EXE = WINDOWS_POWERSHELL if os.path.exists(WINDOWS_POWERSHELL) else "powershell"
@@ -421,7 +424,51 @@ class StoreAPI:
 
     @staticmethod
     def default_user_profile():
-        return {"SearchHistory": [], "PinnedFavorites": [], "ThemeMode": "System"}
+        return {
+            "SearchHistory": [],
+            "PinnedFavorites": [],
+            "ThemeMode": "System",
+            "StoreRing": "Retail",
+            "StoreLanguage": "en-US",
+            "StoreMarket": "US",
+        }
+
+    @staticmethod
+    def normalize_store_ring(value):
+        text = str(value or "Retail").strip()
+        if text.lower() == "retail":
+            return "Retail"
+        upper = text.upper()
+        return upper if upper in STORE_RING_VALUES else "Retail"
+
+    @staticmethod
+    def normalize_store_language(value):
+        text = str(value or "en-US").strip().replace("_", "-")
+        parts = text.split("-")
+        if len(parts) == 2 and all(part.isalpha() for part in parts):
+            language = f"{parts[0].lower()}-{parts[1].upper()}"
+            if re.fullmatch(r"[a-z]{2}-[A-Z]{2}", language):
+                return language
+        return "en-US"
+
+    @staticmethod
+    def normalize_store_market(value):
+        text = str(value or "US").strip().upper()
+        return text if re.fullmatch(r"[A-Z]{2}", text) else "US"
+
+    @staticmethod
+    def store_query_settings(ring=None, language=None, market=None):
+        return {
+            "Ring": StoreAPI.normalize_store_ring(ring),
+            "Language": StoreAPI.normalize_store_language(language),
+            "Market": StoreAPI.normalize_store_market(market),
+        }
+
+    @staticmethod
+    def package_query_metadata(product_id, ring=None, language=None, market=None):
+        metadata = StoreAPI.store_query_settings(ring, language, market)
+        metadata["ProductId"] = str(product_id or "").strip()
+        return metadata
 
     @staticmethod
     def load_user_profile(path=USER_PROFILE_PATH):
@@ -438,6 +485,9 @@ class StoreAPI:
                 if isinstance(item, dict) and item.get("Name") and item.get("ProductId")
             ][:20]
             profile["ThemeMode"] = Theme.normalize_mode(data.get("ThemeMode", "System"))
+            profile["StoreRing"] = StoreAPI.normalize_store_ring(data.get("StoreRing", "Retail"))
+            profile["StoreLanguage"] = StoreAPI.normalize_store_language(data.get("StoreLanguage", "en-US"))
+            profile["StoreMarket"] = StoreAPI.normalize_store_market(data.get("StoreMarket", "US"))
             return profile
         except Exception:
             return StoreAPI.default_user_profile()
@@ -625,23 +675,27 @@ class StoreAPI:
         }
 
     @staticmethod
-    def fetch_release_notes(product_id):
-        url = f"https://apps.microsoft.com/detail/{product_id}?hl=en-US&gl=US"
+    def fetch_release_notes(product_id, language="en-US", market="US"):
+        settings = StoreAPI.store_query_settings(language=language, market=market)
+        url = f"https://apps.microsoft.com/detail/{product_id}?hl={settings['Language']}&gl={settings['Market']}"
         response, _retry_errors = request_with_retries(
             "Microsoft Store product page",
             lambda: requests.get(url, timeout=20, headers={"User-Agent": USER_AGENT}),
             attempts=2,
         )
-        return StoreAPI.parse_release_notes_html(product_id, response.text, response.url)
+        notes = StoreAPI.parse_release_notes_html(product_id, response.text, response.url)
+        notes["StoreQuery"] = StoreAPI.package_query_metadata(product_id, language=settings["Language"], market=settings["Market"])
+        return notes
     
     @staticmethod
-    def get_packages(product_id, ring="Retail"):
-        return StoreAPI.get_packages_with_diagnostics(product_id, ring)["Packages"]
+    def get_packages(product_id, ring="Retail", language="en-US", market="US"):
+        return StoreAPI.get_packages_with_diagnostics(product_id, ring, language, market)["Packages"]
 
     @staticmethod
-    def get_packages_with_diagnostics(product_id, ring="Retail"):
+    def get_packages_with_diagnostics(product_id, ring="Retail", language="en-US", market="US"):
         """Get downloadable packages for a product"""
-        payload = {"type": "ProductId", "url": product_id, "ring": ring, "lang": "en-US"}
+        query = StoreAPI.package_query_metadata(product_id, ring, language, market)
+        payload = {"type": "ProductId", "url": product_id, "ring": query["Ring"], "lang": query["Language"]}
         headers = {"User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded"}
         try:
             resp, retry_errors = request_with_retries(
@@ -655,11 +709,13 @@ class StoreAPI:
             
             if not table:
                 statuses = StoreAPI.detect_source_health()
-                return StoreAPI._source_diagnostic(
+                diagnostic = StoreAPI._source_diagnostic(
                     "RG-Adguard package proxy",
                     errors=retry_errors + ["RG-Adguard response did not include a package table"],
                     fallbacks=package_lookup_fallbacks(product_id, statuses),
                 )
+                diagnostic["Query"] = query
+                return diagnostic
 
             results = []
             for row in table.find_all("tr"):
@@ -691,26 +747,32 @@ class StoreAPI:
                 package = {
                     "FileName": name, "Url": url, "Architecture": arch,
                     "FileType": ext, "IsBundle": is_bundle, "IsEncrypted": is_encrypted,
-                    "SizeBytes": None, "SizeStr": "—"
+                    "SizeBytes": None, "SizeStr": "—", "StoreQuery": query.copy()
                 }
                 results.append(annotate_package(package))
             
-            return StoreAPI._source_diagnostic("RG-Adguard package proxy", packages=results, errors=retry_errors)
+            diagnostic = StoreAPI._source_diagnostic("RG-Adguard package proxy", packages=results, errors=retry_errors)
+            diagnostic["Query"] = query
+            return diagnostic
             
         except StoreSourceError as exc:
             statuses = StoreAPI.detect_source_health()
-            return StoreAPI._source_diagnostic(
+            diagnostic = StoreAPI._source_diagnostic(
                 exc.source_name,
                 errors=exc.errors,
                 fallbacks=package_lookup_fallbacks(product_id, statuses),
             )
+            diagnostic["Query"] = query
+            return diagnostic
         except Exception as exc:
             statuses = StoreAPI.detect_source_health()
-            return StoreAPI._source_diagnostic(
+            diagnostic = StoreAPI._source_diagnostic(
                 "RG-Adguard package proxy",
                 errors=[f"{type(exc).__name__}: {exc}"],
                 fallbacks=package_lookup_fallbacks(product_id, statuses),
             )
+            diagnostic["Query"] = query
+            return diagnostic
     
     @staticmethod
     def get_file_size(url):
@@ -790,6 +852,13 @@ class StoreAPI:
         }
         if package.get("PackageRoleLabel"):
             metadata["PackageRoleLabel"] = package.get("PackageRoleLabel")
+        if package.get("StoreQuery"):
+            query = package.get("StoreQuery", {})
+            metadata["StoreQuery"] = StoreAPI.store_query_settings(
+                query.get("Ring"),
+                query.get("Language"),
+                query.get("Market"),
+            )
         return metadata
 
     @staticmethod
@@ -857,7 +926,7 @@ class StoreAPI:
         allowed_keys = [
             "FileName", "PackageIdentity", "PackageRoleLabel", "Architecture", "FileType",
             "IsBundle", "IsEncrypted", "SizeBytes", "SizeStr", "Sha256", "AvailableVersion",
-            "LocalPath", "CacheManifest",
+            "LocalPath", "CacheManifest", "StoreQuery",
         ]
         items = []
         for package in queue or []:
@@ -1024,6 +1093,15 @@ class StoreAPI:
         return "'" + str(value).replace("'", "''") + "'"
 
     @staticmethod
+    def _package_store_query(package):
+        query = package.get("StoreQuery") or {}
+        return StoreAPI.store_query_settings(
+            query.get("Ring"),
+            query.get("Language"),
+            query.get("Market"),
+        )
+
+    @staticmethod
     def _portable_script_path(package_path, script_dir):
         absolute_path = os.path.abspath(package_path)
         if not script_dir:
@@ -1073,11 +1151,15 @@ class StoreAPI:
             package_path = package.get("LocalPath") or os.path.join(output_path, filename)
             portable_path = StoreAPI._portable_script_path(package_path, script_dir)
             role = package.get("PackageRoleLabel") or package_role_label(filename)
+            query = StoreAPI._package_store_query(package)
             lines.append(
                 "    [pscustomobject]@{ "
                 f"FileName = {StoreAPI._powershell_literal(filename)}; "
                 f"Role = {StoreAPI._powershell_literal(role)}; "
-                f"PackagePath = {StoreAPI._powershell_literal(portable_path)} "
+                f"PackagePath = {StoreAPI._powershell_literal(portable_path)}; "
+                f"StoreRing = {StoreAPI._powershell_literal(query['Ring'])}; "
+                f"StoreLanguage = {StoreAPI._powershell_literal(query['Language'])}; "
+                f"StoreMarket = {StoreAPI._powershell_literal(query['Market'])} "
                 "}"
             )
 
@@ -1090,7 +1172,7 @@ class StoreAPI:
             "        throw \"Package not found: $packagePath\"",
             "    }",
             "",
-            "    Write-Host (\"Provisioning {0} [{1}]\" -f $package.FileName, $package.Role)",
+            "    Write-Host (\"Provisioning {0} [{1}] from {2}/{3}/{4}\" -f $package.FileName, $package.Role, $package.StoreRing, $package.StoreLanguage, $package.StoreMarket)",
             "    $arguments = @(",
             "        '/Online',",
             "        '/Add-ProvisionedAppxPackage',",
@@ -1220,6 +1302,7 @@ class StoreAPI:
                 "Identity": package.get("PackageIdentity") or package_identity(filename),
                 "Version": package.get("AvailableVersion") or format_version_tuple(package_version_tuple(filename)),
                 "Role": package.get("PackageRoleLabel") or package_role_label(filename),
+                "StoreQuery": StoreAPI._package_store_query(package),
             })
 
         if not records:
@@ -1236,10 +1319,14 @@ class StoreAPI:
             "$packages = @(",
         ]
         for record in records:
+            query = record["StoreQuery"]
             lines.append(
                 "    [pscustomobject]@{ "
                 f"FileName = {StoreAPI._powershell_literal(record['FileName'])}; "
-                f"Role = {StoreAPI._powershell_literal(record['Role'])} "
+                f"Role = {StoreAPI._powershell_literal(record['Role'])}; "
+                f"StoreRing = {StoreAPI._powershell_literal(query['Ring'])}; "
+                f"StoreLanguage = {StoreAPI._powershell_literal(query['Language'])}; "
+                f"StoreMarket = {StoreAPI._powershell_literal(query['Market'])} "
                 "}"
             )
         lines.extend([
@@ -1251,7 +1338,7 @@ class StoreAPI:
             "        throw \"Package not found: $packagePath\"",
             "    }",
             "",
-            "    Write-Host (\"Provisioning {0} [{1}]\" -f $package.FileName, $package.Role)",
+            "    Write-Host (\"Provisioning {0} [{1}] from {2}/{3}/{4}\" -f $package.FileName, $package.Role, $package.StoreRing, $package.StoreLanguage, $package.StoreMarket)",
             "    $arguments = @(",
             "        '/Online',",
             "        '/Add-ProvisionedAppxPackage',",
@@ -1342,6 +1429,11 @@ class StoreAPI:
             handle.write(f"Detection script: {detection_script}\n")
             handle.write("Install behavior: System\n")
             handle.write("Run script as 64-bit process: Yes\n")
+            queries = {
+                f"{record['StoreQuery']['Ring']}/{record['StoreQuery']['Language']}/{record['StoreQuery']['Market']}"
+                for record in records
+            }
+            handle.write(f"Store query: {', '.join(sorted(queries))}\n")
 
         return {
             "SourceDir": source_dir,
@@ -1969,6 +2061,9 @@ class MSStoreHelperApp(ctk.CTk):
         
         self.user_profile = StoreAPI.load_user_profile()
         self.theme_mode_var = ctk.StringVar(value=Theme.normalize_mode(self.user_profile.get("ThemeMode", "System")))
+        self.store_ring_var = ctk.StringVar(value=StoreAPI.normalize_store_ring(self.user_profile.get("StoreRing", "Retail")))
+        self.store_language_var = ctk.StringVar(value=StoreAPI.normalize_store_language(self.user_profile.get("StoreLanguage", "en-US")))
+        self.store_market_var = ctk.StringVar(value=StoreAPI.normalize_store_market(self.user_profile.get("StoreMarket", "US")))
         Theme.set_mode(self.theme_mode_var.get())
         ctk.set_appearance_mode(Theme.MODE)
         ctk.set_default_color_theme("dark-blue")
@@ -2066,11 +2161,25 @@ class MSStoreHelperApp(ctk.CTk):
         self.right_panel.grid(row=0, column=2, sticky="ns", padx=(10, 0))
         self.right_panel.grid_propagate(False)
         self._build_queue_panel()
+
+    def _build_store_query_controls(self, parent):
+        self.store_query_button = ctk.CTkButton(
+            parent,
+            text=self._store_query_button_text(),
+            height=28,
+            font=("Segoe UI", 10),
+            fg_color="transparent",
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=self._show_store_query_dialog,
+        )
+        self.store_query_button.pack(fill="x", pady=(6, 0))
     
     def _build_sidebar(self):
         # SEARCH
         search_section = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        search_section.pack(fill="x", padx=15, pady=(20, 10))
+        search_section.pack(fill="x", padx=15, pady=(16, 8))
         
         ctk.CTkLabel(search_section, text="🔍 Find Apps", font=("Segoe UI Semibold", 16), anchor="w").pack(fill="x")
         ctk.CTkLabel(search_section, text="Search by name to find any app", font=("Segoe UI", 11), text_color=Theme.TEXT_MUTED, anchor="w").pack(fill="x", pady=(2, 8))
@@ -2083,12 +2192,13 @@ class MSStoreHelperApp(ctk.CTk):
 
         self.search_history_frame = ctk.CTkFrame(search_section, fg_color="transparent", height=1)
         self._render_search_history()
+        self._build_store_query_controls(search_section)
         
-        ctk.CTkFrame(self.sidebar, fg_color=Theme.BORDER, height=1).pack(fill="x", padx=15, pady=15)
+        ctk.CTkFrame(self.sidebar, fg_color=Theme.BORDER, height=1).pack(fill="x", padx=15, pady=12)
         
         # QUICK FIX
         fix_section = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        fix_section.pack(fill="x", padx=15, pady=(0, 10))
+        fix_section.pack(fill="x", padx=15, pady=(0, 8))
         
         ctk.CTkLabel(fix_section, text="⚡ Quick Actions", font=("Segoe UI Semibold", 16), anchor="w").pack(fill="x")
         ctk.CTkLabel(fix_section, text="One-click solutions for common needs", font=("Segoe UI", 11), text_color=Theme.TEXT_MUTED, anchor="w").pack(fill="x", pady=(2, 8))
@@ -2103,7 +2213,7 @@ class MSStoreHelperApp(ctk.CTk):
         ctk.CTkButton(fix_section, text="🔎 Scan LTSC Gaps", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._scan_ltsc_gaps).pack(fill="x", pady=(0, 6))
         ctk.CTkButton(fix_section, text="🎮 Queue Xbox Core", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._queue_xbox_core).pack(fill="x")
 
-        ctk.CTkFrame(self.sidebar, fg_color=Theme.BORDER, height=1).pack(fill="x", padx=15, pady=15)
+        ctk.CTkFrame(self.sidebar, fg_color=Theme.BORDER, height=1).pack(fill="x", padx=15, pady=10)
 
         self.pinned_section = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         ctk.CTkLabel(self.pinned_section, text="⭐ Pinned Apps", font=("Segoe UI Semibold", 15), anchor="w").pack(fill="x")
@@ -2120,7 +2230,7 @@ class MSStoreHelperApp(ctk.CTk):
         ctk.CTkLabel(cat_section, text="📂 Browse Categories", font=("Segoe UI Semibold", 16), anchor="w").pack(fill="x")
         
         cat_scroll = ctk.CTkScrollableFrame(cat_section, fg_color="transparent")
-        cat_scroll.pack(fill="both", expand=True, pady=(8, 0))
+        cat_scroll.pack(fill="both", expand=True, pady=(5, 0))
         
         for cat_name in APP_CATALOG.keys():
             ctk.CTkButton(cat_scroll, text=cat_name, height=36, font=("Segoe UI", 12), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, hover_color=Theme.BG_CARD_HOVER, anchor="w", command=lambda c=cat_name: self._show_category(c)).pack(fill="x", pady=2)
@@ -2291,6 +2401,8 @@ class MSStoreHelperApp(ctk.CTk):
         self._log("INFO", f"Administrator: {'Yes' if IS_ADMIN else 'No'}")
         self._log("INFO", f"Output Directory: {DEFAULT_OUTPUT}")
         self._log("INFO", f"Theme: {self.theme_mode_var.get()} ({Theme.MODE}) Accent: {Theme.PRIMARY}")
+        settings = self._store_query_settings()
+        self._log("INFO", f"Store query: ring={settings['Ring']}, language={settings['Language']}, market={settings['Market']}")
     
     def _toggle_log_panel(self):
         """Toggle log panel expanded/collapsed"""
@@ -2581,7 +2693,9 @@ Fixes "needs to be online" and similar errors.
 
     def _release_notes_worker(self, app_data):
         try:
-            notes = StoreAPI.fetch_release_notes(app_data["ProductId"])
+            settings = self._store_query_settings()
+            notes = StoreAPI.fetch_release_notes(app_data["ProductId"], settings["Language"], settings["Market"])
+            self.after(0, lambda s=settings, n=app_data.get("Name", "app"): self._log("INFO", f"Release notes query for {n}: language={s['Language']}, market={s['Market']}"))
         except Exception as exc:
             self.after(0, lambda: self._update_status("❌ Release notes failed", Theme.DANGER))
             self.after(0, lambda e=str(exc), n=app_data.get("Name", "app"): self._log("ERROR", f"Failed to fetch release notes for {n}: {e}"))
@@ -2632,6 +2746,101 @@ Fixes "needs to be online" and similar errors.
 
     def _save_user_profile(self):
         StoreAPI.save_user_profile(self.user_profile)
+
+    def _store_query_settings(self):
+        return StoreAPI.store_query_settings(
+            self.store_ring_var.get(),
+            self.store_language_var.get(),
+            self.store_market_var.get(),
+        )
+
+    def _store_query_button_text(self):
+        settings = self._store_query_settings()
+        return f"Query: {settings['Ring']} / {settings['Language']} / {settings['Market']}"
+
+    def _refresh_store_query_button(self):
+        if hasattr(self, "store_query_button"):
+            self.store_query_button.configure(text=self._store_query_button_text())
+
+    def _save_store_query_settings(self):
+        settings = self._store_query_settings()
+        self.store_ring_var.set(settings["Ring"])
+        self.store_language_var.set(settings["Language"])
+        self.store_market_var.set(settings["Market"])
+        self.user_profile["StoreRing"] = settings["Ring"]
+        self.user_profile["StoreLanguage"] = settings["Language"]
+        self.user_profile["StoreMarket"] = settings["Market"]
+        self._save_user_profile()
+        return settings
+
+    def _change_store_query_setting(self, _choice=None):
+        settings = self._save_store_query_settings()
+        self._refresh_store_query_button()
+        summary = f"ring={settings['Ring']}, language={settings['Language']}, market={settings['Market']}"
+        self._update_status(f"Store query: {summary}", Theme.INFO)
+        self._log("INFO", f"Store query settings changed: {summary}")
+
+    def _show_store_query_dialog(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Store Query Settings")
+        dialog.geometry("420x300")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        dialog.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - 420) // 2
+        y = self.winfo_y() + (self.winfo_height() - 300) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        content = ctk.CTkFrame(dialog, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=22, pady=22)
+
+        ctk.CTkLabel(content, text="Store Query", font=("Segoe UI Semibold", 20), anchor="w").pack(fill="x")
+        ctk.CTkLabel(
+            content,
+            text="Used for package lookup, Store product pages, logs, and exported deployment artifacts.",
+            font=("Segoe UI", 12),
+            text_color=Theme.TEXT_SECONDARY,
+            justify="left",
+            wraplength=360,
+            anchor="w",
+        ).pack(fill="x", pady=(4, 14))
+
+        controls = ctk.CTkFrame(content, fg_color="transparent")
+        controls.pack(fill="x")
+        control_rows = [
+            ("Ring", STORE_RING_VALUES, self.store_ring_var),
+            ("Language", STORE_LANGUAGE_VALUES, self.store_language_var),
+            ("Market", STORE_MARKET_VALUES, self.store_market_var),
+        ]
+        for row, (label, values, variable) in enumerate(control_rows):
+            controls.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(controls, text=label, font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY, anchor="w").grid(row=row, column=0, sticky="w", padx=(0, 12), pady=6)
+            ctk.CTkOptionMenu(
+                controls,
+                values=values,
+                variable=variable,
+                width=180,
+                height=32,
+                font=("Segoe UI", 12),
+                fg_color=Theme.BG_INPUT,
+                button_color=Theme.PRIMARY,
+                button_hover_color=Theme.PRIMARY_HOVER,
+                command=self._change_store_query_setting,
+            ).grid(row=row, column=1, sticky="ew", pady=6)
+
+        ctk.CTkButton(
+            content,
+            text="Close",
+            width=90,
+            height=32,
+            font=("Segoe UI", 12),
+            fg_color="transparent",
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=dialog.destroy,
+        ).pack(side="right", pady=(18, 0))
 
     def _change_theme_mode(self, choice):
         mode = Theme.normalize_mode(choice)
@@ -2809,6 +3018,10 @@ Fixes "needs to be online" and similar errors.
 
     def _log_source_diagnostic(self, diagnostic, item_name=None):
         label = item_name or diagnostic.get("Source", "Store source")
+        query = diagnostic.get("Query")
+        if query:
+            summary = f"ring={query.get('Ring')}, language={query.get('Language')}, market={query.get('Market')}"
+            self.after(0, lambda n=label, s=summary: self._log("INFO", f"{n} package query: {s}"))
         for error in diagnostic.get("Errors", []):
             self.after(0, lambda e=error, s=diagnostic.get("Source", "Store source"): self._log("ERROR", f"{s}: {e}"))
         for fallback in diagnostic.get("Fallbacks", []):
@@ -2817,7 +3030,13 @@ Fixes "needs to be online" and similar errors.
             self.after(0, lambda f=fallback, c=command, d=detail, n=label: self._log("WARNING", f"{n} fallback via {f.get('Source')}: {c} ({d})"))
 
     def _get_packages_with_logging(self, app_data):
-        diagnostic = StoreAPI.get_packages_with_diagnostics(app_data["ProductId"])
+        settings = self._store_query_settings()
+        diagnostic = StoreAPI.get_packages_with_diagnostics(
+            app_data["ProductId"],
+            settings["Ring"],
+            settings["Language"],
+            settings["Market"],
+        )
         self._log_source_diagnostic(diagnostic, app_data.get("Name"))
         return diagnostic["Packages"]
     

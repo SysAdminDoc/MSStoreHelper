@@ -2,6 +2,12 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.27.0] - 2026-06-28
+
+- Added persisted Store query controls for RG-Adguard ring, Store language, and market.
+- Changed package lookup, release-note fetches, logs, diagnostics, DISM scripts, and IntuneWin staging output to include Store query metadata.
+- Added tests for query payloads, profile persistence, localized release-note URLs, diagnostics metadata, and deployment artifact metadata.
+
 ## [v3.26.0] - 2026-06-28
 
 - Added theme contrast helpers and tests for core text, muted text, and outline action states.
