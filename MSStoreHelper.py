@@ -65,7 +65,7 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.15.0"
+APP_VERSION = "3.16.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -149,6 +149,13 @@ def format_size(size_bytes):
         size_bytes /= 1024
     return f"{size_bytes:.1f} TB"
 
+def catalog_apps_by_name():
+    apps = {}
+    for category in APP_CATALOG.values():
+        for app in category["apps"]:
+            apps[app["Name"]] = app
+    return apps
+
 # ==================== APP CATALOG ====================
 
 APP_CATALOG = {
@@ -228,6 +235,21 @@ QUICK_FIX_PRESETS = {
         "apps": ["Windows Terminal", "PowerShell 7", "VS Code"]
     },
 }
+
+LTSC_COMPONENT_REQUIREMENTS = [
+    {"Name": "Microsoft Store", "Identities": ["Microsoft.WindowsStore"]},
+    {"Name": "App Installer", "Identities": ["Microsoft.DesktopAppInstaller"]},
+    {"Name": "VC++ Runtime", "Identities": ["Microsoft.VCLibs.140.00"]},
+    {"Name": "Windows Terminal", "Identities": ["Microsoft.WindowsTerminal"]},
+    {"Name": "PowerShell 7", "Identities": ["Microsoft.PowerShell"]},
+    {"Name": "WSL", "Identities": ["MicrosoftCorporationII.WindowsSubsystemForLinux"]},
+    {"Name": "Photos", "Identities": ["Microsoft.Windows.Photos"]},
+    {"Name": "Calculator", "Identities": ["Microsoft.WindowsCalculator"]},
+    {"Name": "Snipping Tool", "Identities": ["Microsoft.ScreenSketch"]},
+    {"Name": "HEVC Codec", "Identities": ["Microsoft.HEVCVideoExtension"]},
+    {"Name": "AV1 Codec", "Identities": ["Microsoft.AV1VideoExtension"]},
+    {"Name": "WebP Images", "Identities": ["Microsoft.WebpImageExtension"]},
+]
 
 # ==================== BACKEND API ====================
 
@@ -869,6 +891,51 @@ if ($sig.SignerCertificate) {{
             return None
 
     @staticmethod
+    def get_installed_appx_identities():
+        cmd = (
+            "$installed = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name); "
+            "$provisioned = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Select-Object -ExpandProperty DisplayName); "
+            "@($installed + $provisioned | Where-Object { $_ } | Sort-Object -Unique) | ConvertTo-Json -Compress"
+        )
+        try:
+            result = subprocess.run(
+                [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return set()
+
+            payload = json.loads(result.stdout)
+            if isinstance(payload, str):
+                payload = [payload]
+            return {str(identity).lower() for identity in payload if identity}
+        except Exception:
+            return set()
+
+    @staticmethod
+    def detect_missing_ltsc_components(installed_identities=None):
+        installed = installed_identities if installed_identities is not None else StoreAPI.get_installed_appx_identities()
+        installed = {str(identity).lower() for identity in installed}
+        catalog = catalog_apps_by_name()
+        missing = []
+
+        for requirement in LTSC_COMPONENT_REQUIREMENTS:
+            identities = [identity.lower() for identity in requirement["Identities"]]
+            if any(identity in installed for identity in identities):
+                continue
+
+            app = catalog.get(requirement["Name"])
+            if not app:
+                continue
+            missing_app = app.copy()
+            missing_app["MissingIdentities"] = requirement["Identities"]
+            missing.append(missing_app)
+
+        return missing
+
+    @staticmethod
     def should_skip_installed_package(package):
         package_name = package.get("PackageIdentity") or package_identity(package["FileName"])
         installed_version = StoreAPI.get_installed_package_version(package_name)
@@ -1218,7 +1285,8 @@ class MSStoreHelperApp(ctk.CTk):
         self.quickfix_desc = ctk.CTkLabel(fix_section, text=QUICK_FIX_PRESETS[self.quickfix_var.get()]["description"], font=("Segoe UI", 11), text_color=Theme.TEXT_SECONDARY, wraplength=240, justify="left", anchor="w")
         self.quickfix_desc.pack(fill="x", pady=(0, 8))
         
-        ctk.CTkButton(fix_section, text="⚡ Apply Quick Fix", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._apply_quickfix).pack(fill="x")
+        ctk.CTkButton(fix_section, text="⚡ Apply Quick Fix", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._apply_quickfix).pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(fix_section, text="🔎 Scan LTSC Gaps", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._scan_ltsc_gaps).pack(fill="x")
         
         ctk.CTkFrame(self.sidebar, fg_color=Theme.BORDER, height=1).pack(fill="x", padx=15, pady=15)
         
@@ -1787,6 +1855,58 @@ Fixes "needs to be online" and similar errors.
         else:
             self._update_status("✅ WinGet manifest exported", Theme.SUCCESS)
             self._log("SUCCESS", f"WinGet import manifest saved: {saved_path} ({count} package(s))")
+
+    def _scan_ltsc_gaps(self):
+        target_arch = self._target_arch()
+        prefer_exact = self._has_arch_override()
+        self._update_status("🔎 Scanning LTSC components...", Theme.INFO)
+        threading.Thread(
+            target=self._scan_ltsc_gaps_worker,
+            args=(target_arch, prefer_exact),
+            daemon=True,
+        ).start()
+
+    def _scan_ltsc_gaps_worker(self, target_arch, prefer_exact):
+        try:
+            missing_apps = StoreAPI.detect_missing_ltsc_components()
+        except Exception as exc:
+            self.after(0, lambda: self._update_status("❌ LTSC scan failed", Theme.DANGER))
+            self.after(0, lambda e=str(exc): self._log("ERROR", f"LTSC component scan failed: {e}"))
+            return
+
+        if not missing_apps:
+            self.after(0, lambda: self._update_status("✅ LTSC components present", Theme.SUCCESS))
+            self.after(0, lambda: self._log("SUCCESS", "LTSC component scan found no missing tracked components"))
+            return
+
+        missing_names = ", ".join(app["Name"] for app in missing_apps)
+        self.after(0, lambda names=missing_names: self._log("INFO", f"Missing LTSC components: {names}"))
+
+        queued_count = 0
+        for app in missing_apps:
+            self.after(0, lambda n=app["Name"]: self._update_status(f"📥 Queueing {n}...", Theme.INFO))
+            packages = StoreAPI.get_packages(app["ProductId"])
+            if not packages:
+                self.after(0, lambda n=app["Name"]: self._log("WARNING", f"No packages found for missing LTSC component: {n}"))
+                continue
+
+            recommended = StoreAPI.smart_select(packages, target_arch, prefer_exact)
+            for package in recommended:
+                if any(queued["FileName"] == package["FileName"] for queued in self.download_queue):
+                    continue
+                self.download_queue.append(annotate_package(package.copy()))
+                queued_count += 1
+
+        self.download_queue = StoreAPI.order_packages_for_install(self.download_queue, target_arch)
+        dependency_count = sum(1 for pkg in self.download_queue if is_dependency_package(pkg))
+
+        if queued_count:
+            self.after(0, self._update_queue_ui)
+            self.after(0, lambda c=queued_count: self._update_status(f"✅ Queued {c} LTSC package(s)", Theme.SUCCESS))
+            self.after(0, lambda c=queued_count, d=dependency_count: self._log("SUCCESS", f"Queued {c} package(s) for missing LTSC components; dependencies in queue: {d}"))
+        else:
+            self.after(0, lambda: self._update_status("⚠️ No LTSC packages queued", Theme.WARNING))
+            self.after(0, lambda: self._log("WARNING", "LTSC scan found missing components but no downloadable packages were queued"))
     
     def _fetch_selected_worker(self):
         all_packages = []
