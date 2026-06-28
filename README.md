@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.12.0-blue)
+![Version](https://img.shields.io/badge/version-3.13.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -28,6 +28,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 🧹 **Cache Rebuild** - Scans, backs up, and recreates Store cache folders offline
 - 🗂️ **Shared Offline Cache** - Mirrors downloaded AppX/MSIX artifacts to a shared folder for air-gapped reuse
 - 🧾 **DISM Provisioning Export** - Generates fleet-ready PowerShell scripts that call DISM for queued packages
+- 📋 **WinGet Import Export** - Saves selected Store apps as a reproducible WinGet `msstore` import manifest
 - 📋 **Verbose Console** - Detailed logging with error hints and troubleshooting tips
 
 ---
@@ -88,6 +89,13 @@ python MSStoreHelper.py
 2. Click **"🧾 Export DISM Script"**
 3. Save the generated `.ps1` beside the downloaded packages or in your shared cache
 4. Run the script from an elevated PowerShell session on the target PC
+
+### 📋 Exporting a WinGet Manifest
+
+1. Browse a category or search for apps
+2. Select the apps you want to reproduce on other PCs
+3. Click **"Export WinGet"**
+4. Import the saved `.json` with `winget import -i <file>`
 
 ### 📦 Installing Packages
 
@@ -156,7 +164,8 @@ MSStoreHelper/
 │   ├── test_package_resolution.py # Resolver tests
 │   ├── test_store_repair.py       # Store repair tests
 │   ├── test_offline_cache.py      # Shared cache tests
-│   └── test_dism_export.py        # DISM export tests
+│   ├── test_dism_export.py        # DISM export tests
+│   └── test_winget_export.py      # WinGet manifest tests
 ├── README.md                      # This file
 ├── LICENSE                        # MIT License
 ├── icon.png / icon.ico            # App icon assets
@@ -170,7 +179,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.12.0"
+APP_VERSION = "3.13.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 

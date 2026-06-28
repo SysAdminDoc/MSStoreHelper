@@ -15,7 +15,7 @@ import webbrowser
 import json
 import shutil
 from tkinter import filedialog
-from datetime import datetime
+from datetime import datetime, timezone
 from msstore_package_resolution import (
     annotate_package,
     format_version_tuple,
@@ -64,11 +64,18 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.12.0"
+APP_VERSION = "3.13.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+WINGET_IMPORT_SCHEMA = "https://aka.ms/winget-packages.schema.2.0.json"
+WINGET_MSSTORE_SOURCE = {
+    "Argument": "https://storeedgefd.dsx.mp.microsoft.com/v9.0",
+    "Identifier": "StoreEdgeFD",
+    "Name": "msstore",
+    "Type": "Microsoft.Rest",
+}
 WINDOWS_DIR = os.environ.get("WINDIR", r"C:\Windows")
 WINDOWS_POWERSHELL = os.path.join(WINDOWS_DIR, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 POWERSHELL_EXE = WINDOWS_POWERSHELL if os.path.exists(WINDOWS_POWERSHELL) else "powershell"
@@ -456,6 +463,71 @@ class StoreAPI:
         with open(script_path, "w", encoding="utf-8", newline="\r\n") as handle:
             handle.write(script)
         return script_path
+
+    @staticmethod
+    def get_winget_version():
+        try:
+            result = subprocess.run(
+                ["winget", "--version"],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            version = (result.stdout or "").strip()
+            return version.lstrip("v") if result.returncode == 0 and version else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _winget_creation_date(created_at=None):
+        created_at = created_at or datetime.now(timezone.utc)
+        if isinstance(created_at, datetime):
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            return created_at.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "-00:00")
+        return str(created_at)
+
+    @staticmethod
+    def build_winget_import_manifest(apps, winget_version=None, created_at=None):
+        packages = []
+        seen = set()
+        for app in apps:
+            package_id = str(app.get("ProductId") or "").strip()
+            if not package_id:
+                continue
+            key = package_id.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            packages.append({"PackageIdentifier": package_id})
+
+        if not packages:
+            raise ValueError("No selected apps have WinGet package identifiers")
+
+        manifest = {
+            "$schema": WINGET_IMPORT_SCHEMA,
+            "CreationDate": StoreAPI._winget_creation_date(created_at),
+            "Sources": [
+                {
+                    "Packages": packages,
+                    "SourceDetails": WINGET_MSSTORE_SOURCE.copy(),
+                }
+            ],
+        }
+        if winget_version:
+            manifest["WinGetVersion"] = str(winget_version).lstrip("v")
+        return manifest
+
+    @staticmethod
+    def write_winget_import_manifest(apps, manifest_path, winget_version=None, created_at=None):
+        detected_version = winget_version if winget_version is not None else StoreAPI.get_winget_version()
+        manifest = StoreAPI.build_winget_import_manifest(apps, detected_version, created_at)
+        manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
+        os.makedirs(manifest_dir, exist_ok=True)
+        with open(manifest_path, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(manifest, handle, indent=2)
+            handle.write("\n")
+        return manifest_path, len(manifest["Sources"][0]["Packages"])
 
     @staticmethod
     def install_package(filepath):
@@ -1190,10 +1262,15 @@ class MSStoreHelperApp(ctk.CTk):
         
         header = ctk.CTkFrame(self.content, fg_color="transparent")
         header.pack(fill="x", padx=10, pady=(10, 5))
-        
-        ctk.CTkLabel(header, text=category_name, font=("Segoe UI Semibold", 22)).pack(side="left")
-        ctk.CTkButton(header, text="Get Selected Apps", height=36, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._fetch_selected).pack(side="right")
-        ctk.CTkLabel(header, text=cat_data.get("description", ""), font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY).pack(side="left", padx=20)
+
+        title_group = ctk.CTkFrame(header, fg_color="transparent")
+        title_group.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(title_group, text=category_name, font=("Segoe UI Semibold", 22), anchor="w").pack(fill="x")
+        ctk.CTkLabel(title_group, text=cat_data.get("description", ""), font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY, anchor="w").pack(fill="x", pady=(2, 0))
+        actions = ctk.CTkFrame(header, fg_color="transparent")
+        actions.pack(side="right")
+        ctk.CTkButton(actions, text="Export WinGet", width=120, height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_winget_manifest).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(actions, text="Get Selected Apps", width=135, height=36, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._fetch_selected).pack(side="left")
         
         scroll = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
         scroll.pack(fill="both", expand=True, padx=5, pady=5)
@@ -1208,9 +1285,15 @@ class MSStoreHelperApp(ctk.CTk):
         
         header = ctk.CTkFrame(self.content, fg_color="transparent")
         header.pack(fill="x", padx=10, pady=(10, 5))
-        
-        ctk.CTkLabel(header, text=f'🔍 Results for "{query}"', font=("Segoe UI Semibold", 20)).pack(side="left")
-        ctk.CTkLabel(header, text=f"{len(results)} apps found", font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY).pack(side="left", padx=15)
+
+        title_group = ctk.CTkFrame(header, fg_color="transparent")
+        title_group.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(title_group, text=f'🔍 Results for "{query}"', font=("Segoe UI Semibold", 20), anchor="w").pack(fill="x")
+        ctk.CTkLabel(title_group, text=f"{len(results)} apps found", font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY, anchor="w").pack(fill="x", pady=(2, 0))
+        actions = ctk.CTkFrame(header, fg_color="transparent")
+        actions.pack(side="right")
+        ctk.CTkButton(actions, text="Export WinGet", width=120, height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_winget_manifest).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(actions, text="Get Selected Apps", width=135, height=36, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._fetch_selected).pack(side="left")
         
         if not results:
             empty = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -1310,6 +1393,9 @@ Search by name (e.g., "Spotify") or browse categories.
 
 📦 Getting Downloads  
 Click "Get Files" or select apps and click "Get Selected Apps".
+
+📋 WinGet Export
+Select apps and click "Export WinGet" to save an import manifest.
 
 ✨ Smart Select
 Automatically picks the best files - prefers bundles, skips encrypted files, chooses newest versions.
@@ -1422,6 +1508,36 @@ Fixes "needs to be online" and similar errors.
             return
         self._update_status("📥 Fetching packages...", Theme.INFO)
         threading.Thread(target=self._fetch_selected_worker, daemon=True).start()
+
+    def _export_winget_manifest(self):
+        if not self.selected_apps:
+            self._update_status("⚠️ No apps selected", Theme.WARNING)
+            self._log("WARNING", "No selected apps to export to WinGet")
+            return
+
+        initial_dir = self.output_path if os.path.exists(self.output_path) else DEFAULT_OUTPUT
+        os.makedirs(initial_dir, exist_ok=True)
+        manifest_path = filedialog.asksaveasfilename(
+            title="Save WinGet import manifest",
+            initialdir=initial_dir,
+            initialfile="MSStoreHelper-WinGetImport.json",
+            defaultextension=".json",
+            filetypes=[("WinGet import manifest", "*.json"), ("All files", "*.*")],
+        )
+        if not manifest_path:
+            return
+
+        try:
+            saved_path, count = StoreAPI.write_winget_import_manifest(self.selected_apps, manifest_path)
+        except ValueError as exc:
+            self._update_status("⚠️ No WinGet IDs selected", Theme.WARNING)
+            self._log("WARNING", str(exc))
+        except Exception as exc:
+            self._update_status("❌ WinGet export failed", Theme.DANGER)
+            self._log("ERROR", f"Failed to export WinGet manifest: {exc}")
+        else:
+            self._update_status("✅ WinGet manifest exported", Theme.SUCCESS)
+            self._log("SUCCESS", f"WinGet import manifest saved: {saved_path} ({count} package(s))")
     
     def _fetch_selected_worker(self):
         all_packages = []
