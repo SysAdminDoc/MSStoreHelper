@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.16.0-blue)
+![Version](https://img.shields.io/badge/version-3.17.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -18,6 +18,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - ⚡ **Quick Fix Presets** - One-click solutions for common needs (Repair Store, Gaming Setup, Media Codecs)
 - 🧰 **LTSC Essentials** - One-click preset for Terminal, PowerShell 7, WSL, Photos, Calculator, and Snipping Tool
 - 🔎 **LTSC Gap Scan** - Detects missing LTSC components and queues the matching Store packages automatically
+- 🎮 **Xbox Core Queue** - Queues Xbox Identity and Gaming Services with known-good version pinning and fallback logging
 - ✨ **Smart Select** - Automatically picks the best packages and dependency frameworks (bundles, correct architecture, newest versions)
 - ⏭️ **Delta Detection** - Skips packages when the same or newer version is already installed
 - 🧭 **Architecture Override** - Force x64, x86, ARM64, ARM, or neutral package selection when needed
@@ -77,6 +78,7 @@ python MSStoreHelper.py
 2. **Browse Categories**: Click a category in the sidebar to see curated app lists
 3. **Quick Actions**: Use presets for common tasks like LTSC Essentials, Store repair, or gaming setup
 4. **Scan LTSC Gaps**: Click **"🔎 Scan LTSC Gaps"** to detect and queue missing tracked components
+5. **Xbox Core**: Click **"🎮 Queue Xbox Core"** to queue Xbox Identity and Gaming Services through the pinned install path
 
 ### 📦 Downloading Packages
 
@@ -192,7 +194,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.16.0"
+APP_VERSION = "3.17.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 

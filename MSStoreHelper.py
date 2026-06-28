@@ -22,6 +22,7 @@ from msstore_package_resolution import (
     format_version_tuple,
     installed_version_satisfies_package,
     is_dependency_package,
+    is_arch_compatible,
     is_installable_package,
     order_packages_for_install,
     package_identity,
@@ -65,7 +66,7 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.16.0"
+APP_VERSION = "3.17.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -251,6 +252,21 @@ LTSC_COMPONENT_REQUIREMENTS = [
     {"Name": "WebP Images", "Identities": ["Microsoft.WebpImageExtension"]},
 ]
 
+XBOX_CORE_PACKAGE_PINS = [
+    {
+        "Name": "Xbox Identity",
+        "ProductId": "9WZDNCRD1HKW",
+        "Identity": "Microsoft.XboxIdentityProvider",
+        "KnownGoodVersions": ["12.50.6001.0"],
+    },
+    {
+        "Name": "Gaming Services",
+        "ProductId": "9MWPM2CQNLHN",
+        "Identity": "Microsoft.GamingServices",
+        "KnownGoodVersions": ["2.51.3002.0"],
+    },
+]
+
 # ==================== BACKEND API ====================
 
 class StoreAPI:
@@ -353,6 +369,44 @@ class StoreAPI:
     @staticmethod
     def order_packages_for_install(packages, target_arch):
         return order_packages_for_install(packages, target_arch)
+
+    @staticmethod
+    def select_pinned_xbox_packages(packages, target_arch, prefer_exact_arch=False):
+        selected = []
+        dependencies = [
+            package for package in packages
+            if is_dependency_package(package) and is_installable_package(package) and is_arch_compatible(package, target_arch)
+        ]
+        selected.extend(annotate_package(package.copy()) for package in select_recommended_packages(dependencies, target_arch, prefer_exact_arch))
+
+        for pin in XBOX_CORE_PACKAGE_PINS:
+            identity = pin["Identity"].lower()
+            candidates = [
+                package for package in packages
+                if package_identity(package["FileName"]).lower() == identity
+                and is_installable_package(package)
+                and is_arch_compatible(package, target_arch)
+            ]
+            if not candidates:
+                continue
+
+            pinned_versions = set(pin["KnownGoodVersions"])
+            pinned_candidates = [
+                package for package in candidates
+                if format_version_tuple(package_version_tuple(package["FileName"])) in pinned_versions
+            ]
+            source = pinned_candidates or candidates
+            recommended = select_recommended_packages(source, target_arch, prefer_exact_arch)
+            if not recommended:
+                continue
+
+            package = annotate_package(recommended[0].copy())
+            package["XboxCoreName"] = pin["Name"]
+            package["PinnedVersions"] = list(pin["KnownGoodVersions"])
+            package["PinnedVersionMatched"] = bool(pinned_candidates)
+            selected.append(package)
+
+        return order_packages_for_install(selected, target_arch)
     
     @staticmethod
     def download_file(url, filepath, progress_callback=None):
@@ -1286,7 +1340,8 @@ class MSStoreHelperApp(ctk.CTk):
         self.quickfix_desc.pack(fill="x", pady=(0, 8))
         
         ctk.CTkButton(fix_section, text="⚡ Apply Quick Fix", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._apply_quickfix).pack(fill="x", pady=(0, 6))
-        ctk.CTkButton(fix_section, text="🔎 Scan LTSC Gaps", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._scan_ltsc_gaps).pack(fill="x")
+        ctk.CTkButton(fix_section, text="🔎 Scan LTSC Gaps", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._scan_ltsc_gaps).pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(fix_section, text="🎮 Queue Xbox Core", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._queue_xbox_core).pack(fill="x")
         
         ctk.CTkFrame(self.sidebar, fg_color=Theme.BORDER, height=1).pack(fill="x", padx=15, pady=15)
         
@@ -1907,6 +1962,49 @@ Fixes "needs to be online" and similar errors.
         else:
             self.after(0, lambda: self._update_status("⚠️ No LTSC packages queued", Theme.WARNING))
             self.after(0, lambda: self._log("WARNING", "LTSC scan found missing components but no downloadable packages were queued"))
+
+    def _queue_xbox_core(self):
+        target_arch = self._target_arch()
+        prefer_exact = self._has_arch_override()
+        self._update_status("🎮 Fetching Xbox core packages...", Theme.INFO)
+        threading.Thread(
+            target=self._queue_xbox_core_worker,
+            args=(target_arch, prefer_exact),
+            daemon=True,
+        ).start()
+
+    def _queue_xbox_core_worker(self, target_arch, prefer_exact):
+        all_packages = []
+        for pin in XBOX_CORE_PACKAGE_PINS:
+            self.after(0, lambda n=pin["Name"]: self._log("INFO", f"Fetching pinned Xbox core package: {n}"))
+            packages = StoreAPI.get_packages(pin["ProductId"])
+            if not packages:
+                self.after(0, lambda n=pin["Name"]: self._log("WARNING", f"No packages found for Xbox core item: {n}"))
+            all_packages.extend(packages)
+
+        selected = StoreAPI.select_pinned_xbox_packages(all_packages, target_arch, prefer_exact)
+        queued_count = 0
+        for package in selected:
+            if any(queued["FileName"] == package["FileName"] for queued in self.download_queue):
+                continue
+            self.download_queue.append(annotate_package(package.copy()))
+            queued_count += 1
+
+            if package.get("XboxCoreName"):
+                if package.get("PinnedVersionMatched"):
+                    self.after(0, lambda p=package: self._log("SUCCESS", f"Using pinned {p['XboxCoreName']} version: {p.get('AvailableVersion', 'unknown')}"))
+                else:
+                    pins = ", ".join(package.get("PinnedVersions", [])) or "configured pin"
+                    self.after(0, lambda p=package, pins=pins: self._log("WARNING", f"Pinned {p['XboxCoreName']} version ({pins}) not available; queued {p.get('AvailableVersion', 'unknown')}"))
+
+        self.download_queue = StoreAPI.order_packages_for_install(self.download_queue, target_arch)
+        if queued_count:
+            self.after(0, self._update_queue_ui)
+            self.after(0, lambda c=queued_count: self._update_status(f"✅ Queued {c} Xbox core package(s)", Theme.SUCCESS))
+            self.after(0, lambda c=queued_count: self._log("SUCCESS", f"Queued {c} Xbox core package(s) with dependency-first ordering"))
+        else:
+            self.after(0, lambda: self._update_status("⚠️ No Xbox packages queued", Theme.WARNING))
+            self.after(0, lambda: self._log("WARNING", "Xbox core queue did not find downloadable packages"))
     
     def _fetch_selected_worker(self):
         all_packages = []
