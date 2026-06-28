@@ -66,7 +66,7 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.17.0"
+APP_VERSION = "3.18.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -95,6 +95,9 @@ try:
     DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 except:
     DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "MSStoreHelper")
+
+APP_DATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
+USER_PROFILE_PATH = os.path.join(APP_DATA_DIR, "profile.json")
 
 try:
     IS_ADMIN = ctypes.windll.shell32.IsUserAnAdmin() != 0
@@ -271,6 +274,84 @@ XBOX_CORE_PACKAGE_PINS = [
 
 class StoreAPI:
     """Handles all API communications"""
+
+    @staticmethod
+    def default_user_profile():
+        return {"SearchHistory": [], "PinnedFavorites": []}
+
+    @staticmethod
+    def load_user_profile(path=USER_PROFILE_PATH):
+        try:
+            if not os.path.exists(path):
+                return StoreAPI.default_user_profile()
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            profile = StoreAPI.default_user_profile()
+            profile["SearchHistory"] = [str(item) for item in data.get("SearchHistory", []) if str(item).strip()][:10]
+            profile["PinnedFavorites"] = [
+                StoreAPI.normalize_favorite_app(item)
+                for item in data.get("PinnedFavorites", [])
+                if isinstance(item, dict) and item.get("Name") and item.get("ProductId")
+            ][:20]
+            return profile
+        except Exception:
+            return StoreAPI.default_user_profile()
+
+    @staticmethod
+    def save_user_profile(profile, path=USER_PROFILE_PATH):
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(profile, handle, indent=2)
+            handle.write("\n")
+        return path
+
+    @staticmethod
+    def normalize_favorite_app(app_data):
+        return {
+            "Name": str(app_data.get("Name", "")).strip(),
+            "ProductId": str(app_data.get("ProductId", "")).strip(),
+            "Publisher": str(app_data.get("Publisher", "")).strip(),
+            "Description": str(app_data.get("Description", "")).strip(),
+            "Icon": app_data.get("Icon", "📦"),
+        }
+
+    @staticmethod
+    def add_search_history(profile, query, max_items=10):
+        query = str(query or "").strip()
+        if not query:
+            return profile
+
+        history = [item for item in profile.get("SearchHistory", []) if item.lower() != query.lower()]
+        profile["SearchHistory"] = [query] + history[:max_items - 1]
+        return profile
+
+    @staticmethod
+    def add_pinned_favorites(profile, apps, max_items=20):
+        favorites = profile.get("PinnedFavorites", [])
+        by_id = {app["ProductId"].lower(): app for app in favorites if app.get("ProductId")}
+        ordered_ids = [app["ProductId"].lower() for app in favorites if app.get("ProductId")]
+
+        added = 0
+        for app in apps:
+            favorite = StoreAPI.normalize_favorite_app(app)
+            if not favorite["Name"] or not favorite["ProductId"]:
+                continue
+            key = favorite["ProductId"].lower()
+            if key not in by_id:
+                ordered_ids.insert(0, key)
+                added += 1
+            by_id[key] = favorite
+
+        seen = set()
+        profile["PinnedFavorites"] = []
+        for key in ordered_ids:
+            if key in seen or key not in by_id:
+                continue
+            seen.add(key)
+            profile["PinnedFavorites"].append(by_id[key])
+            if len(profile["PinnedFavorites"]) >= max_items:
+                break
+        return added
     
     @staticmethod
     def search_store(query, max_results=25):
@@ -1246,6 +1327,7 @@ class MSStoreHelperApp(ctk.CTk):
         self.arch_override_var = ctk.StringVar(value=self.arch_options[0])
         self.package_scroll = None
         self.output_path = DEFAULT_OUTPUT
+        self.user_profile = StoreAPI.load_user_profile()
         self.shared_cache_enabled = ctk.BooleanVar(value=False)
         self.shared_cache_path = os.path.join(DEFAULT_OUTPUT, "SharedCache")
         
@@ -1323,6 +1405,9 @@ class MSStoreHelperApp(ctk.CTk):
         self.search_entry.bind("<Return>", lambda e: self._do_search())
         
         ctk.CTkButton(search_section, text="🔍 Search Store", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._do_search).pack(fill="x")
+
+        self.search_history_frame = ctk.CTkFrame(search_section, fg_color="transparent", height=1)
+        self._render_search_history()
         
         ctk.CTkFrame(self.sidebar, fg_color=Theme.BORDER, height=1).pack(fill="x", padx=15, pady=15)
         
@@ -1342,6 +1427,14 @@ class MSStoreHelperApp(ctk.CTk):
         ctk.CTkButton(fix_section, text="⚡ Apply Quick Fix", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._apply_quickfix).pack(fill="x", pady=(0, 6))
         ctk.CTkButton(fix_section, text="🔎 Scan LTSC Gaps", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._scan_ltsc_gaps).pack(fill="x", pady=(0, 6))
         ctk.CTkButton(fix_section, text="🎮 Queue Xbox Core", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._queue_xbox_core).pack(fill="x")
+
+        ctk.CTkFrame(self.sidebar, fg_color=Theme.BORDER, height=1).pack(fill="x", padx=15, pady=15)
+
+        self.pinned_section = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        ctk.CTkLabel(self.pinned_section, text="⭐ Pinned Apps", font=("Segoe UI Semibold", 15), anchor="w").pack(fill="x")
+        self.pinned_list_frame = ctk.CTkFrame(self.pinned_section, fg_color="transparent", height=1)
+        self.pinned_list_frame.pack(fill="x", pady=(6, 0))
+        self._render_pinned_favorites()
         
         ctk.CTkFrame(self.sidebar, fg_color=Theme.BORDER, height=1).pack(fill="x", padx=15, pady=15)
         
@@ -1638,6 +1731,7 @@ class MSStoreHelperApp(ctk.CTk):
         ctk.CTkLabel(title_group, text=cat_data.get("description", ""), font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY, anchor="w").pack(fill="x", pady=(2, 0))
         actions = ctk.CTkFrame(header, fg_color="transparent")
         actions.pack(side="right")
+        ctk.CTkButton(actions, text="Pin Selected", width=105, height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._pin_selected_apps).pack(side="left", padx=(0, 8))
         ctk.CTkButton(actions, text="Export WinGet", width=120, height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_winget_manifest).pack(side="left", padx=(0, 8))
         ctk.CTkButton(actions, text="Get Selected Apps", width=135, height=36, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._fetch_selected).pack(side="left")
         
@@ -1661,6 +1755,7 @@ class MSStoreHelperApp(ctk.CTk):
         ctk.CTkLabel(title_group, text=f"{len(results)} apps found", font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY, anchor="w").pack(fill="x", pady=(2, 0))
         actions = ctk.CTkFrame(header, fg_color="transparent")
         actions.pack(side="right")
+        ctk.CTkButton(actions, text="Pin Selected", width=105, height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._pin_selected_apps).pack(side="left", padx=(0, 8))
         ctk.CTkButton(actions, text="Export WinGet", width=120, height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_winget_manifest).pack(side="left", padx=(0, 8))
         ctk.CTkButton(actions, text="Get Selected Apps", width=135, height=36, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._fetch_selected).pack(side="left")
         
@@ -1804,6 +1899,104 @@ Fixes "needs to be online" and similar errors.
     def _update_quickfix_desc(self, choice):
         self.quickfix_desc.configure(text=QUICK_FIX_PRESETS.get(choice, {}).get("description", ""))
 
+    def _save_user_profile(self):
+        StoreAPI.save_user_profile(self.user_profile)
+
+    def _render_search_history(self):
+        if not hasattr(self, "search_history_frame"):
+            return
+
+        for widget in self.search_history_frame.winfo_children():
+            widget.destroy()
+
+        history = self.user_profile.get("SearchHistory", [])[:4]
+        if not history:
+            self.search_history_frame.pack_forget()
+            return
+
+        if not self.search_history_frame.winfo_manager():
+            self.search_history_frame.pack(fill="x", pady=(8, 0))
+
+        ctk.CTkLabel(self.search_history_frame, text="Recent", font=("Segoe UI", 10), text_color=Theme.TEXT_MUTED, anchor="w").pack(fill="x")
+        for query in history:
+            ctk.CTkButton(
+                self.search_history_frame,
+                text=query[:32],
+                height=26,
+                font=("Segoe UI", 11),
+                fg_color="transparent",
+                border_width=1,
+                border_color=Theme.BORDER,
+                hover_color=Theme.BG_CARD_HOVER,
+                anchor="w",
+                command=lambda q=query: self._search_from_history(q),
+            ).pack(fill="x", pady=(4, 0))
+
+    def _render_pinned_favorites(self):
+        if not hasattr(self, "pinned_list_frame"):
+            return
+
+        for widget in self.pinned_list_frame.winfo_children():
+            widget.destroy()
+
+        favorites = self.user_profile.get("PinnedFavorites", [])[:5]
+        if not favorites:
+            self.pinned_section.pack_forget()
+            return
+
+        if not self.pinned_section.winfo_manager():
+            self.pinned_section.pack(fill="x", padx=15, pady=(0, 10))
+
+        for app in favorites:
+            ctk.CTkButton(
+                self.pinned_list_frame,
+                text=f"{app.get('Icon', '📦')} {app['Name']}"[:34],
+                height=30,
+                font=("Segoe UI", 11),
+                fg_color="transparent",
+                border_width=1,
+                border_color=Theme.BORDER,
+                hover_color=Theme.BG_CARD_HOVER,
+                anchor="w",
+                command=lambda a=app: self._fetch_single_app(a),
+            ).pack(fill="x", pady=(0, 5))
+
+        ctk.CTkButton(
+            self.pinned_list_frame,
+            text="Clear Pins",
+            height=26,
+            font=("Segoe UI", 10),
+            fg_color="transparent",
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=self._clear_pinned_favorites,
+        ).pack(fill="x", pady=(2, 0))
+
+    def _search_from_history(self, query):
+        self.search_entry.delete(0, "end")
+        self.search_entry.insert(0, query)
+        self._do_search()
+
+    def _pin_selected_apps(self):
+        if not self.selected_apps:
+            self._update_status("⚠️ No apps selected", Theme.WARNING)
+            self._log("WARNING", "No selected apps to pin")
+            return
+
+        added = StoreAPI.add_pinned_favorites(self.user_profile, self.selected_apps)
+        self._save_user_profile()
+        self._render_pinned_favorites()
+        self._update_status(f"⭐ Pinned {len(self.selected_apps)} app(s)", Theme.SUCCESS)
+        self._log("SUCCESS", f"Pinned favorites updated ({added} new, {len(self.user_profile.get('PinnedFavorites', []))} total)")
+
+    def _clear_pinned_favorites(self):
+        self.user_profile["PinnedFavorites"] = []
+        self._save_user_profile()
+        self._render_pinned_favorites()
+        self._update_status("Pinned apps cleared", Theme.TEXT_SECONDARY)
+        self._log("INFO", "Pinned favorites cleared")
+
     def _format_shared_cache_path(self):
         if len(self.shared_cache_path) <= 38:
             return self.shared_cache_path
@@ -1857,6 +2050,9 @@ Fixes "needs to be online" and similar errors.
         query = self.search_entry.get().strip()
         if not query:
             return
+        StoreAPI.add_search_history(self.user_profile, query)
+        self._save_user_profile()
+        self._render_search_history()
         self._update_status("🔍 Searching...", Theme.INFO)
         threading.Thread(target=self._search_worker, args=(query,), daemon=True).start()
     
