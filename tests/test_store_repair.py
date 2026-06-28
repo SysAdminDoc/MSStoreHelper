@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
 
+import json
+import os
+import tempfile
 import unittest
+from unittest.mock import patch
 
 from MSStoreHelper import StoreAPI
+
+
+class FakePowerShellResult:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 class StoreRepairTests(unittest.TestCase):
@@ -19,6 +30,7 @@ class StoreRepairTests(unittest.TestCase):
         self.assertIn("ClipSVC", commands)
         self.assertIn("LicenseManager", commands)
         self.assertIn("Microsoft.StorePurchaseApp", commands)
+        self.assertIn("Backup-MSStoreHelperPath", commands)
 
     def test_provisioning_repair_steps_clear_deprovisioned_store_keys(self):
         steps = StoreAPI.get_provisioning_repair_steps()
@@ -32,6 +44,7 @@ class StoreRepairTests(unittest.TestCase):
         self.assertIn("Microsoft.StorePurchaseApp", commands)
         self.assertIn("Microsoft.DesktopAppInstaller", commands)
         self.assertIn("Add-AppxPackage", commands)
+        self.assertIn("Backup-MSStoreHelperRegistryPath", commands)
 
     def test_licensing_reset_steps_restart_services_and_clear_cache(self):
         steps = StoreAPI.get_licensing_reset_steps()
@@ -45,6 +58,7 @@ class StoreRepairTests(unittest.TestCase):
         self.assertIn("LicenseManager", commands)
         self.assertIn("GenuineTicket", commands)
         self.assertIn("Microsoft.StorePurchaseApp", commands)
+        self.assertIn("Backup-MSStoreHelperPath", commands)
 
     def test_cache_rebuild_steps_scan_backup_and_recreate_cache(self):
         steps = StoreAPI.get_cache_rebuild_steps()
@@ -56,10 +70,41 @@ class StoreRepairTests(unittest.TestCase):
         self.assertIn("Rebuilding clean Store cache folders", descriptions)
         self.assertIn("LocalCache", commands)
         self.assertIn("INetCache", commands)
-        self.assertIn("Move-Item", commands)
-        self.assertIn(".bak-", commands)
+        self.assertIn("Backup-MSStoreHelperPath", commands)
         self.assertIn("New-Item", commands)
         self.assertIn("wsreset.exe", commands)
+
+    def test_run_powershell_steps_records_manifest_restore_script_and_output(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("MSStoreHelper.subprocess.run", return_value=FakePowerShellResult(1, "out text", "err text")) as run_mock:
+                results = StoreAPI._run_powershell_steps(
+                    [("Failing step", "Write-Error 'bad'")],
+                    timeout=5,
+                    repair_name="unit-test",
+                    backup_root=temp_dir,
+                )
+
+            self.assertEqual(len(results), 1)
+            self.assertFalse(results[0]["Success"])
+            self.assertEqual(results[0]["ReturnCode"], 1)
+            self.assertEqual(results[0]["Stdout"], "out text")
+            self.assertEqual(results[0]["Stderr"], "err text")
+            self.assertTrue(os.path.exists(results[0]["ManifestPath"]))
+            self.assertTrue(os.path.exists(results[0]["RestoreScriptPath"]))
+            invoked_command = run_mock.call_args.args[0][-1]
+            self.assertIn("Backup-MSStoreHelperPath", invoked_command)
+            self.assertIn("Microsoft\\.PowerShell\\.Core\\\\Registry::HKEY_LOCAL_MACHINE", invoked_command)
+            self.assertIn("Write-Error 'bad'", invoked_command)
+
+            with open(results[0]["ManifestPath"], "r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            self.assertEqual(manifest["RepairName"], "unit-test")
+            self.assertEqual(manifest["Results"][0]["Stderr"], "err text")
+
+            with open(results[0]["RestoreScriptPath"], "r", encoding="utf-8") as handle:
+                restore_script = handle.read()
+            self.assertIn("backup-records.jsonl", restore_script)
+            self.assertIn("reg.exe import", restore_script)
 
 
 if __name__ == "__main__":

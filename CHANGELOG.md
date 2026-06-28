@@ -2,6 +2,12 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.21.0] - 2026-06-28
+
+- Added timestamped repair backup manifests and restore scripts for Store repair, provisioning repair, licensing reset, and cache rebuild actions.
+- Changed repair PowerShell execution to capture structured stdout, stderr, exit code, command text, and backup paths per step.
+- Added tests for fail-visible repair output and rollback artifact generation.
+
 ## [v3.20.0] - 2026-06-28
 
 - Added atomic `.part` downloads with final-file replacement only after the full response is received.

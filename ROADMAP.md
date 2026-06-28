@@ -48,13 +48,6 @@ GUI tool to download/install Microsoft Store apps without the Store UI. Planned 
 
 ## Research-Driven Additions
 
-- [ ] P0 - Repair rollback manifest and fail-visible PowerShell runner
-  Why: Store repair/cache/licensing actions mutate user and system Store state but only return coarse step success.
-  Evidence: `MSStoreHelper.py:1267`, `MSStoreHelper.py:1311`, LTSC-Add-MicrosoftStore repair guidance, Microsoft Appx repair cmdlets.
-  Touches: `MSStoreHelper.py`, repair command generation, log panel, `tests/test_store_repair.py`.
-  Acceptance: every destructive repair writes a timestamped backup manifest plus restore script, captures stdout/stderr per step, and reports exact failed command/output in the GUI log.
-  Complexity: M
-
 - [ ] P1 - Store source adapter layer with health and fallback
   Why: Search/package/release-note calls are hard-coded to single live endpoints with no retry, health state, or alternate source.
   Evidence: `MSStoreHelper.py:456`, `MSStoreHelper.py:554`, `MSStoreHelper.py:561`, WinGet, Store CLI, RG-Adguard, StoreEdgeFD.
