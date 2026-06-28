@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.10.0-blue)
+![Version](https://img.shields.io/badge/version-3.11.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -29,6 +29,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 👥 **Provisioning Repair** - Clears Store deprovision tombstones and re-registers Store apps for new profiles
 - 🔐 **Licensing Reset** - Restarts ClipSVC/LicenseManager and refreshes Store purchase licensing
 - 🧹 **Cache Rebuild** - Scans, backs up, and recreates Store cache folders offline
+- 🗂️ **Shared Offline Cache** - Mirrors downloaded AppX/MSIX artifacts to a shared folder for air-gapped reuse
 - 📋 **Verbose Console** - Detailed logging with error hints and troubleshooting tips
 
 ---
@@ -80,7 +81,8 @@ python MSStoreHelper.py
 2. Review the available packages (bundles, different architectures, versions)
 3. Click **"✨ Smart Select"** to automatically pick the best files
 4. Click **"➕ Add to Queue"** to add selected packages to the download queue
-5. Click **"⬇️ Download All"** to start downloading
+5. Optional: enable **Shared cache** and pick a shared folder for air-gapped reuse
+6. Click **"⬇️ Download All"** to start downloading
 
 ### 📦 Installing Packages
 
@@ -160,7 +162,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.10.0"
+APP_VERSION = "3.11.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 

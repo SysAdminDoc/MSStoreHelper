@@ -13,6 +13,8 @@ import threading
 import ctypes
 import webbrowser
 import json
+import shutil
+from tkinter import filedialog
 from datetime import datetime
 from msstore_package_resolution import (
     annotate_package,
@@ -61,7 +63,7 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.10.0"
+APP_VERSION = "3.11.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -334,7 +336,28 @@ class StoreAPI:
             return True, "Success"
         except Exception as e:
             return False, str(e)
-    
+
+    @staticmethod
+    def is_cacheable_artifact(filename):
+        return os.path.splitext(filename)[1].lower() in {".appx", ".msix", ".appxbundle", ".msixbundle"}
+
+    @staticmethod
+    def cache_downloaded_artifact(package, cache_path):
+        local_path = package.get("LocalPath")
+        filename = package.get("FileName", os.path.basename(local_path or ""))
+        if not local_path or not os.path.exists(local_path):
+            return False, "Downloaded file is missing"
+        if not StoreAPI.is_cacheable_artifact(filename):
+            return False, "File type is not cacheable"
+
+        os.makedirs(cache_path, exist_ok=True)
+        destination = os.path.join(cache_path, filename)
+        if os.path.exists(destination) and os.path.getsize(destination) == os.path.getsize(local_path):
+            return True, f"Already cached: {destination}"
+
+        shutil.copy2(local_path, destination)
+        return True, f"Cached: {destination}"
+
     @staticmethod
     def install_package(filepath):
         try:
@@ -686,6 +709,8 @@ class MSStoreHelperApp(ctk.CTk):
         self.arch_override_var = ctk.StringVar(value=self.arch_options[0])
         self.package_scroll = None
         self.output_path = DEFAULT_OUTPUT
+        self.shared_cache_enabled = ctk.BooleanVar(value=False)
+        self.shared_cache_path = os.path.join(DEFAULT_OUTPUT, "SharedCache")
         
         self._build_ui()
         self._show_welcome()
@@ -821,6 +846,40 @@ class MSStoreHelperApp(ctk.CTk):
         btn_frame.pack(fill="x", padx=15, pady=(0, 10))
         
         ctk.CTkButton(btn_frame, text="Clear", width=70, height=32, font=("Segoe UI", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._clear_queue).pack(side="left")
+
+        cache_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
+        cache_frame.pack(fill="x", padx=15, pady=(0, 10))
+
+        ctk.CTkCheckBox(
+            cache_frame,
+            text="Shared cache",
+            variable=self.shared_cache_enabled,
+            font=("Segoe UI", 12),
+            fg_color=Theme.PRIMARY,
+            hover_color=Theme.PRIMARY_HOVER,
+            command=self._update_shared_cache_state,
+        ).pack(side="left")
+        ctk.CTkButton(
+            cache_frame,
+            text="Browse",
+            width=70,
+            height=30,
+            font=("Segoe UI", 12),
+            fg_color="transparent",
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=self._choose_shared_cache_folder,
+        ).pack(side="right")
+
+        self.shared_cache_label = ctk.CTkLabel(
+            self.right_panel,
+            text=self._format_shared_cache_path(),
+            font=("Consolas", 10),
+            text_color=Theme.TEXT_MUTED,
+            anchor="w",
+        )
+        self.shared_cache_label.pack(fill="x", padx=15, pady=(0, 10))
         
         progress_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
         progress_frame.pack(fill="x", padx=15, pady=(0, 10))
@@ -1187,6 +1246,28 @@ Fixes "needs to be online" and similar errors.
     def _update_quickfix_desc(self, choice):
         self.quickfix_desc.configure(text=QUICK_FIX_PRESETS.get(choice, {}).get("description", ""))
 
+    def _format_shared_cache_path(self):
+        if len(self.shared_cache_path) <= 38:
+            return self.shared_cache_path
+        return f"{self.shared_cache_path[:16]}...{self.shared_cache_path[-19:]}"
+
+    def _update_shared_cache_state(self):
+        state = "enabled" if self.shared_cache_enabled.get() else "disabled"
+        self._log("INFO", f"Shared offline cache {state}: {self.shared_cache_path}")
+
+    def _choose_shared_cache_folder(self):
+        selected = filedialog.askdirectory(
+            title="Select shared offline cache folder",
+            initialdir=self.shared_cache_path if os.path.exists(self.shared_cache_path) else DEFAULT_OUTPUT,
+        )
+        if not selected:
+            return
+
+        self.shared_cache_path = selected
+        self.shared_cache_enabled.set(True)
+        self.shared_cache_label.configure(text=self._format_shared_cache_path())
+        self._log("INFO", f"Shared offline cache folder: {self.shared_cache_path}")
+
     def _on_arch_override_change(self, _choice=None):
         target_arch = self._target_arch()
         mode = "override" if self._has_arch_override() else "auto"
@@ -1417,6 +1498,10 @@ Fixes "needs to be online" and similar errors.
                     self.after(0, lambda w=pkg['_status_widget']: w.configure(text="✅ Done", text_color=Theme.SUCCESS))
                     self.after(0, lambda n=fname: self._log("SUCCESS", f"  Downloaded: {n}"))
                     success_count += 1
+                    if self.shared_cache_enabled.get():
+                        cache_success, cache_msg = StoreAPI.cache_downloaded_artifact(pkg, self.shared_cache_path)
+                        level = "SUCCESS" if cache_success else "WARNING"
+                        self.after(0, lambda lvl=level, m=cache_msg: self._log(lvl, f"  Shared cache: {m}"))
                 else:
                     self.after(0, lambda w=pkg['_status_widget']: w.configure(text="❌ Failed", text_color=Theme.DANGER))
                     self.after(0, lambda n=fname, e=error_msg: self._log("ERROR", f"  Failed to download {n}: {e}"))
