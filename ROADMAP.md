@@ -48,13 +48,6 @@ GUI tool to download/install Microsoft Store apps without the Store UI. Planned 
 
 ## Research-Driven Additions
 
-- [ ] P1 - Structured diagnostics bundle
-  Why: The in-app console is useful interactively but not enough for repeatable LTSC/RMM support.
-  Evidence: `MSStoreHelper.py:1836`, `MSStoreHelper.py:2706`, Intune Win32 detection/reporting expectations, commercial patch-management reporting patterns.
-  Touches: logging layer, profile-safe redaction helper, export action, tests for generated diagnostics.
-  Acceptance: user can export a ZIP with app version, Windows build, architecture, source health, queue metadata, repair/download/install logs, and redacted PowerShell transcripts.
-  Complexity: M
-
 - [ ] P1 - Mocked integration harness for Store and PowerShell workflows
   Why: Existing tests cover pure functions and script text, but not endpoint parser drift or full download/install/export failure paths.
   Evidence: `tests/`, `StoreAPI.get_packages`, `StoreAPI.install_package`, `StoreAPI.create_intunewin_package`.

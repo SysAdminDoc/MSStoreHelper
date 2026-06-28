@@ -17,6 +17,7 @@ import re
 import hashlib
 import shutil
 import tempfile
+import zipfile
 try:
     import winreg
 except ImportError:
@@ -87,7 +88,7 @@ from bs4 import BeautifulSoup
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.23.0"
+APP_VERSION = "3.24.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -800,6 +801,118 @@ class StoreAPI:
         package["Sha256"] = metadata["Sha256"]
         package["CacheManifest"] = StoreAPI._manifest_path(folder)
         return metadata
+
+    @staticmethod
+    def redact_diagnostic_text(text):
+        redacted = str(text or "")
+        path_tokens = {
+            "USERPROFILE": os.environ.get("USERPROFILE"),
+            "APPDATA": os.environ.get("APPDATA"),
+            "LOCALAPPDATA": os.environ.get("LOCALAPPDATA"),
+            "TEMP": tempfile.gettempdir(),
+            "APP_DATA": APP_DATA_DIR,
+        }
+        for label, path in path_tokens.items():
+            if path:
+                redacted = redacted.replace(path, f"%{label}%")
+                redacted = redacted.replace(path.replace("\\", "/"), f"%{label}%")
+
+        secret_patterns = [
+            r"(?i)(authorization\s*[:=]\s*)([^\s;]+)",
+            r"(?i)((?:api[_-]?key|password|secret|token)\s*[:=]\s*)([^\s;]+)",
+        ]
+        for pattern in secret_patterns:
+            redacted = re.sub(pattern, r"\1[REDACTED]", redacted)
+        return redacted
+
+    @staticmethod
+    def diagnostic_queue_metadata(queue):
+        allowed_keys = [
+            "FileName", "PackageIdentity", "PackageRoleLabel", "Architecture", "FileType",
+            "IsBundle", "IsEncrypted", "SizeBytes", "SizeStr", "Sha256", "AvailableVersion",
+            "LocalPath", "CacheManifest",
+        ]
+        items = []
+        for package in queue or []:
+            item = {key: package.get(key) for key in allowed_keys if key in package}
+            for key in ("LocalPath", "CacheManifest"):
+                if key in item:
+                    item[key] = StoreAPI.redact_diagnostic_text(item[key])
+            items.append(item)
+        return items
+
+    @staticmethod
+    def collect_recent_repair_manifests(limit=5):
+        if not os.path.isdir(REPAIR_BACKUP_DIR):
+            return []
+
+        manifests = []
+        for root, _dirs, files in os.walk(REPAIR_BACKUP_DIR):
+            if "repair-manifest.json" not in files:
+                continue
+            manifest_path = os.path.join(root, "repair-manifest.json")
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+                manifests.append((os.path.getmtime(manifest_path), data))
+            except Exception:
+                continue
+
+        recent = []
+        for _mtime, data in sorted(manifests, reverse=True)[:limit]:
+            text = StoreAPI.redact_diagnostic_text(json.dumps(data, indent=2))
+            try:
+                recent.append(json.loads(text))
+            except json.JSONDecodeError:
+                recent.append({"Raw": text})
+        return recent
+
+    @staticmethod
+    def powershell_transcript_from_log(log_text):
+        needles = ("powershell", "command:", "stdout:", "stderr:", "repair", "installing", "add-appxpackage", "dism")
+        lines = [
+            line for line in str(log_text or "").splitlines()
+            if any(needle in line.lower() for needle in needles)
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def write_diagnostics_bundle(bundle_path, app_version, system_arch, is_admin, output_path, source_health, queue, log_text):
+        os.makedirs(os.path.dirname(os.path.abspath(bundle_path)), exist_ok=True)
+        redacted_log = StoreAPI.redact_diagnostic_text(log_text)
+        redacted_transcript = StoreAPI.redact_diagnostic_text(StoreAPI.powershell_transcript_from_log(log_text))
+        queue_metadata = StoreAPI.diagnostic_queue_metadata(queue)
+        repair_manifests = StoreAPI.collect_recent_repair_manifests()
+        diagnostics = {
+            "AppName": APP_NAME,
+            "AppVersion": app_version,
+            "GeneratedAt": datetime.now(timezone.utc).isoformat(),
+            "Windows": {
+                "Platform": platform.platform(),
+                "Release": platform.release(),
+                "Version": platform.version(),
+                "Machine": platform.machine(),
+            },
+            "Python": {
+                "Version": platform.python_version(),
+                "Executable": StoreAPI.redact_diagnostic_text(sys.executable),
+            },
+            "SystemArchitecture": system_arch,
+            "IsAdmin": bool(is_admin),
+            "OutputPath": StoreAPI.redact_diagnostic_text(output_path),
+            "SourceHealth": source_health or [],
+            "QueueCount": len(queue_metadata),
+            "RepairManifestCount": len(repair_manifests),
+        }
+
+        with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("diagnostics.json", json.dumps(diagnostics, indent=2))
+            archive.writestr("source-health.json", json.dumps(source_health or [], indent=2))
+            archive.writestr("queue.json", json.dumps(queue_metadata, indent=2))
+            archive.writestr("app-log.txt", redacted_log)
+            archive.writestr("powershell-transcript.txt", redacted_transcript)
+            archive.writestr("repair-manifests.json", json.dumps(repair_manifests, indent=2))
+        return bundle_path
 
     @staticmethod
     def cached_artifact_is_valid(path, metadata):
@@ -2012,6 +2125,7 @@ class MSStoreHelperApp(ctk.CTk):
         btn_frame.pack(fill="x", padx=15, pady=(0, 10))
         
         ctk.CTkButton(btn_frame, text="Clear", width=70, height=32, font=("Segoe UI", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._clear_queue).pack(side="left")
+        ctk.CTkButton(btn_frame, text="Diagnostics", width=110, height=32, font=("Segoe UI", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_diagnostics_bundle).pack(side="right")
 
         cache_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
         cache_frame.pack(fill="x", padx=15, pady=(0, 10))
@@ -2198,12 +2312,16 @@ class MSStoreHelperApp(ctk.CTk):
     
     def _copy_log(self):
         """Copy log contents to clipboard"""
-        self.log_text.configure(state="normal")
-        content = self.log_text.get("1.0", "end-1c")
-        self.log_text.configure(state="disabled")
+        content = self._current_log_text()
         self.clipboard_clear()
         self.clipboard_append(content)
         self._log("INFO", "Log copied to clipboard")
+
+    def _current_log_text(self):
+        self.log_text.configure(state="normal")
+        content = self.log_text.get("1.0", "end-1c")
+        self.log_text.configure(state="disabled")
+        return content
     
     def _clear_log(self):
         """Clear log contents"""
@@ -2642,18 +2760,24 @@ Fixes "needs to be online" and similar errors.
         total_size = sum(p.get('SizeBytes', 0) or 0 for p in self.current_packages if p['FileName'] in self.selected_packages)
         self.selection_info.configure(text=f"{count} selected ({format_size(total_size)})")
 
+    def _post_ui(self, callback):
+        try:
+            self.after(0, callback)
+        except RuntimeError:
+            pass
+
     def _source_health_worker(self):
-        self.after(0, lambda: self._log("INFO", "Checking Store source availability..."))
+        self._post_ui(lambda: self._log("INFO", "Checking Store source availability..."))
         try:
             statuses = StoreAPI.detect_source_health()
         except Exception as exc:
-            self.after(0, lambda e=str(exc): self._log("WARNING", f"Source health check failed: {e}"))
+            self._post_ui(lambda e=str(exc): self._log("WARNING", f"Source health check failed: {e}"))
             return
 
         self.source_health = statuses
         for status in statuses:
             level = "SUCCESS" if status.get("Available") else "WARNING"
-            self.after(0, lambda s=status, lvl=level: self._log(lvl, source_status_summary(s)))
+            self._post_ui(lambda s=status, lvl=level: self._log(lvl, source_status_summary(s)))
 
     def _log_source_diagnostic(self, diagnostic, item_name=None):
         label = item_name or diagnostic.get("Source", "Store source")
@@ -2970,6 +3094,37 @@ Fixes "needs to be online" and similar errors.
             self._update_status("⚠️ Queue is empty", Theme.WARNING)
             return
         threading.Thread(target=self._download_worker, daemon=True).start()
+
+    def _export_diagnostics_bundle(self):
+        initial_dir = self.output_path if os.path.exists(self.output_path) else DEFAULT_OUTPUT
+        os.makedirs(initial_dir, exist_ok=True)
+        bundle_path = filedialog.asksaveasfilename(
+            title="Save diagnostics bundle",
+            initialdir=initial_dir,
+            initialfile=f"MSStoreHelper-Diagnostics-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip",
+            defaultextension=".zip",
+            filetypes=[("ZIP archive", "*.zip"), ("All files", "*.*")],
+        )
+        if not bundle_path:
+            return
+
+        try:
+            StoreAPI.write_diagnostics_bundle(
+                bundle_path,
+                APP_VERSION,
+                SYSTEM_ARCH,
+                IS_ADMIN,
+                self.output_path,
+                self.source_health,
+                self.download_queue,
+                self._current_log_text(),
+            )
+        except Exception as exc:
+            self._update_status("âŒ Diagnostics export failed", Theme.DANGER)
+            self._log("ERROR", f"Failed to export diagnostics bundle: {exc}")
+        else:
+            self._update_status("âœ… Diagnostics exported", Theme.SUCCESS)
+            self._log("SUCCESS", f"Diagnostics bundle saved: {bundle_path}")
 
     def _export_dism_script(self):
         if not self.download_queue:

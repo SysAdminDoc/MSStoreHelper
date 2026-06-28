@@ -2,6 +2,12 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.24.0] - 2026-06-28
+
+- Added a redacted diagnostics ZIP export with app version, Windows/Python details, source health, queue metadata, app logs, PowerShell transcript lines, and recent repair manifests.
+- Changed the queue panel to expose a Diagnostics action for support bundle generation.
+- Added tests for diagnostics bundle contents and redaction behavior.
+
 ## [v3.23.0] - 2026-06-28
 
 - Added pinned `requirements.txt` and `pyproject.toml` package metadata with a `msstorehelper` entry point.
