@@ -45,41 +45,49 @@ from store_sources import (
     source_status_summary,
 )
 
-# ==================== DEPENDENCY AUTO-INSTALL ====================
-def install_requirements():
-    required = {
-        'customtkinter': 'customtkinter',
-        'requests': 'requests',
-        'bs4': 'beautifulsoup4',
-    }
-    missing = []
-    
-    for import_name, pip_name in required.items():
-        try:
-            __import__(import_name)
-        except ImportError:
-            missing.append(pip_name)
-    
-    if missing:
-        print(f"🔧 Installing: {', '.join(missing)}...")
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', *missing], 
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print("✅ Done! Restarting...")
-        os.execv(sys.executable, ['python'] + sys.argv)
+# ==================== DEPENDENCY CHECK ====================
+REQUIRED_DEPENDENCIES = {
+    "customtkinter": "customtkinter==5.2.2",
+    "requests": "requests==2.32.5",
+    "bs4": "beautifulsoup4==4.14.3",
+}
 
-try:
-    import customtkinter as ctk
-    import requests
-    from bs4 import BeautifulSoup
-except ImportError:
-    install_requirements()
-    import customtkinter as ctk
-    import requests
-    from bs4 import BeautifulSoup
+
+def find_missing_dependencies(importer=__import__):
+    missing = []
+    for import_name, requirement in REQUIRED_DEPENDENCIES.items():
+        try:
+            importer(import_name)
+        except ImportError:
+            missing.append(requirement)
+    return missing
+
+
+def dependency_setup_message(missing):
+    requirements = ", ".join(missing)
+    return (
+        f"Missing Python dependencies: {requirements}\n"
+        "Install pinned dependencies with:\n"
+        "  py -3 -m pip install -r requirements.txt\n"
+        "For offline installs, prepare a wheelhouse on a connected PC:\n"
+        "  py -3 -m pip download -r requirements.txt -d wheelhouse\n"
+        "Then install on the target PC with:\n"
+        "  py -3 -m pip install --no-index --find-links wheelhouse -r requirements.txt"
+    )
+
+
+missing_dependencies = find_missing_dependencies()
+if missing_dependencies:
+    print(dependency_setup_message(missing_dependencies), file=sys.stderr)
+    raise SystemExit(1)
+
+import customtkinter as ctk
+import requests
+from bs4 import BeautifulSoup
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.22.0"
+APP_VERSION = "3.23.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -3347,6 +3355,10 @@ Fixes "needs to be online" and similar errors.
             self.after(0, lambda: self._log("WARNING", f"Cache rebuild partially complete: {success_count}/{len(results)} steps succeeded"))
 
 
-if __name__ == "__main__":
+def main():
     app = MSStoreHelperApp()
     app.mainloop()
+
+
+if __name__ == "__main__":
+    main()

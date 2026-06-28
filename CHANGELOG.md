@@ -2,6 +2,12 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.23.0] - 2026-06-28
+
+- Added pinned `requirements.txt` and `pyproject.toml` package metadata with a `msstorehelper` entry point.
+- Changed dependency bootstrap to fail fast with online and offline wheelhouse install commands instead of running `pip install` at app startup.
+- Added tests for dependency detection and setup-message content.
+
 ## [v3.22.0] - 2026-06-28
 
 - Added a Store source adapter helper for HTTP retry diagnostics, source health checks, and WinGet/Store CLI fallback hints.

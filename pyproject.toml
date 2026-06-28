@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "msstorehelper"
+version = "3.23.0"
+description = "GUI tool to download and install Microsoft Store apps without the Store UI."
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+authors = [
+  { name = "SysAdminDoc", email = "matt_parker@outlook.com" }
+]
+dependencies = [
+  "customtkinter==5.2.2",
+  "requests==2.32.5",
+  "beautifulsoup4==4.14.3",
+]
+
+[project.scripts]
+msstorehelper = "MSStoreHelper:main"
+
+[tool.setuptools]
+py-modules = ["MSStoreHelper", "msstore_package_resolution", "store_sources"]

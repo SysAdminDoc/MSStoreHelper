@@ -48,13 +48,6 @@ GUI tool to download/install Microsoft Store apps without the Store UI. Planned 
 
 ## Research-Driven Additions
 
-- [ ] P1 - Normal Python packaging and offline dependency bootstrap
-  Why: Runtime `pip install` is unreliable on restricted LTSC machines and there is no tracked dependency lock or release artifact.
-  Evidence: `MSStoreHelper.py:41`, PyPI release history for `customtkinter`, `requests`, and `beautifulsoup4`.
-  Touches: `requirements.txt`, optional `pyproject.toml`, README setup, build script/spec, packaging smoke test.
-  Acceptance: clean checkout installs from pinned requirements or an offline wheelhouse, source run no longer shells out to pip unexpectedly, and the built artifact launches once on Windows.
-  Complexity: M
-
 - [ ] P1 - Structured diagnostics bundle
   Why: The in-app console is useful interactively but not enough for repeatable LTSC/RMM support.
   Evidence: `MSStoreHelper.py:1836`, `MSStoreHelper.py:2706`, Intune Win32 detection/reporting expectations, commercial patch-management reporting patterns.

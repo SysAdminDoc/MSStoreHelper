@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.22.0-blue)
+![Version](https://img.shields.io/badge/version-3.23.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -28,6 +28,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 🛡️ **Signature Verification** - Blocks installs unless the package signature chains to Microsoft
 - 🔐 **Verified Downloads** - Writes packages atomically and records SHA-256 metadata before cache reuse
 - **Source Health** - Detects StoreEdgeFD, RG-Adguard, WinGet, and Store CLI availability with fallback hints
+- **Pinned Python Setup** - Uses `requirements.txt` and package metadata instead of runtime dependency installs
 - 📥 **Download Queue** - Queue multiple packages with progress tracking
 - 📦 **Install Packages** - Install downloaded apps directly (requires Admin)
 - 🔧 **Store Repair** - Built-in repair preset for Store cache, TokenBroker, licensing, and connectivity issues
@@ -49,7 +50,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - **Python 3.8+**
 - **Administrator rights** (for installation only)
 
-Dependencies are auto-installed on first run:
+Install pinned dependencies before first run:
 - `customtkinter` - Modern UI framework
 - `requests` - HTTP client
 - `beautifulsoup4` - HTML parsing
@@ -64,8 +65,17 @@ Dependencies are auto-installed on first run:
 git clone https://github.com/SysAdminDoc/MSStoreHelper.git
 cd MSStoreHelper
 
-# Run (dependencies auto-install)
+# Install pinned dependencies
+py -3 -m pip install -r requirements.txt
+
+# Run
 python MSStoreHelper.py
+```
+
+For offline PCs, prepare a wheelhouse on a connected PC:
+```powershell
+py -3 -m pip download -r requirements.txt -d wheelhouse
+py -3 -m pip install --no-index --find-links wheelhouse -r requirements.txt
 ```
 
 ### Option 2: Run as Admin (for installation features)
@@ -183,6 +193,8 @@ MSStoreHelper/
 ├── MSStoreHelper.py               # Main application
 ├── store_sources.py               # Store source health, retry, and fallback helpers
 ├── msstore_package_resolution.py  # Package selection and install ordering
+├── pyproject.toml                 # Python package metadata
+├── requirements.txt               # Pinned runtime dependencies
 ├── tests/
 │   ├── test_package_resolution.py # Resolver tests
 │   ├── test_store_repair.py       # Store repair tests
@@ -192,6 +204,7 @@ MSStoreHelper/
 │   ├── test_intune_export.py      # IntuneWin package tests
 │   ├── test_ltsc_workflow.py      # LTSC preset tests
 │   ├── test_user_profile.py       # Search history and favorites tests
+│   ├── test_dependency_bootstrap.py # Dependency setup tests
 │   ├── test_release_notes.py      # Store page release-note tests
 │   └── test_store_sources.py      # Source health and fallback tests
 ├── README.md                      # This file
@@ -207,7 +220,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.22.0"
+APP_VERSION = "3.23.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 
