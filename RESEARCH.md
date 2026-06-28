@@ -36,7 +36,7 @@ Top opportunities:
 - Verified: `MSStoreHelper.py:1267` repair/cache steps remove or move Store/TokenBroker/ClipSVC paths with `-ErrorAction SilentlyContinue`; results only report process return codes, not item-level backup/restore evidence.
 - Verified: `MSStoreHelper.py:456`, `MSStoreHelper.py:561`, and `MSStoreHelper.py:554` call live Microsoft/RG-Adguard endpoints with fixed timeouts but no source health status, retry/backoff, cache fallback, or user-visible root-cause classification.
 - Verified: `MSStoreHelper.py:41` installs missing dependencies at runtime with unpinned `pip install`; this is fragile in restricted environments and conflicts with reproducible/offline use.
-- Verified: `APP_VERSION` is `3.20.0` in the dirty local `MSStoreHelper.py`, while `README.md`, `CLAUDE.md`, and `CHANGELOG.md` still say `3.19.0`; sync this when the local theme pass ships.
+- Verified: `APP_VERSION` is `3.20.0` in the dirty local `MSStoreHelper.py`, while `README.md` and `CHANGELOG.md` still say `3.19.0`; sync this when the local theme pass ships.
 - Missing guardrails: no crash log file, diagnostic bundle, persisted operation log, endpoint transcript redaction, or machine capability report.
 - Recovery needs: repair actions should write a timestamped backup manifest and generated restore script; downloads should be recoverable from `.part` files and a cache manifest.
 
