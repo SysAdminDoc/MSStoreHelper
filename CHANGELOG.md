@@ -2,6 +2,12 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.22.0] - 2026-06-28
+
+- Added a Store source adapter helper for HTTP retry diagnostics, source health checks, and WinGet/Store CLI fallback hints.
+- Changed Store search, package lookup, and release-note fetches to use source-specific retry/error reporting.
+- Added tests for source health detection, retry recovery, fallback command generation, and RG-Adguard package parsing.
+
 ## [v3.21.0] - 2026-06-28
 
 - Added timestamped repair backup manifests and restore scripts for Store repair, provisioning repair, licensing reset, and cache rebuild actions.

@@ -48,13 +48,6 @@ GUI tool to download/install Microsoft Store apps without the Store UI. Planned 
 
 ## Research-Driven Additions
 
-- [ ] P1 - Store source adapter layer with health and fallback
-  Why: Search/package/release-note calls are hard-coded to single live endpoints with no retry, health state, or alternate source.
-  Evidence: `MSStoreHelper.py:456`, `MSStoreHelper.py:554`, `MSStoreHelper.py:561`, WinGet, Store CLI, RG-Adguard, StoreEdgeFD.
-  Touches: `MSStoreHelper.py`, new `store_sources.py`, parser fixtures, search/package UI status text.
-  Acceptance: StoreEdgeFD, RG-Adguard, WinGet, and Store CLI availability are detected; failures show source-specific causes; package lookup can retry/fallback without losing queued work.
-  Complexity: L
-
 - [ ] P1 - Normal Python packaging and offline dependency bootstrap
   Why: Runtime `pip install` is unreliable on restricted LTSC machines and there is no tracked dependency lock or release artifact.
   Evidence: `MSStoreHelper.py:41`, PyPI release history for `customtkinter`, `requests`, and `beautifulsoup4`.

@@ -37,6 +37,13 @@ from msstore_package_resolution import (
     select_recommended_packages,
     signature_info_is_valid_microsoft,
 )
+from store_sources import (
+    StoreSourceError,
+    detect_source_health,
+    package_lookup_fallbacks,
+    request_with_retries,
+    source_status_summary,
+)
 
 # ==================== DEPENDENCY AUTO-INSTALL ====================
 def install_requirements():
@@ -72,7 +79,7 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.21.0"
+APP_VERSION = "3.22.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -454,16 +461,43 @@ class StoreAPI:
             if len(profile["PinnedFavorites"]) >= max_items:
                 break
         return added
+
+    @staticmethod
+    def detect_source_health():
+        search_payload = {"Query": {"KeyWord": "calculator", "MatchType": "Substring"}}
+        search_headers = {"User-Agent": USER_AGENT, "Content-Type": "application/json"}
+        rg_payload = {"type": "ProductId", "url": "9N0DX20HK701", "ring": "Retail", "lang": "en-US"}
+        rg_headers = {"User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded"}
+        return detect_source_health(
+            storeedge_request=lambda: requests.post(STORE_SEARCH_URL, json=search_payload, headers=search_headers, timeout=8),
+            rgadguard_request=lambda: requests.post(API_URL, data=rg_payload, headers=rg_headers, timeout=8),
+        )
+
+    @staticmethod
+    def _source_diagnostic(source_name, packages=None, results=None, errors=None, fallbacks=None):
+        return {
+            "Source": source_name,
+            "Packages": packages or [],
+            "Results": results or [],
+            "Errors": errors or [],
+            "Fallbacks": fallbacks or [],
+        }
     
     @staticmethod
     def search_store(query, max_results=25):
+        return StoreAPI.search_store_with_diagnostics(query, max_results)["Results"]
+
+    @staticmethod
+    def search_store_with_diagnostics(query, max_results=25):
         """Search Microsoft Store by app name"""
+        payload = {"Query": {"KeyWord": query, "MatchType": "Substring"}}
+        headers = {"User-Agent": USER_AGENT, "Content-Type": "application/json"}
         try:
-            payload = {"Query": {"KeyWord": query, "MatchType": "Substring"}}
-            headers = {"User-Agent": USER_AGENT, "Content-Type": "application/json"}
-            
-            resp = requests.post(STORE_SEARCH_URL, json=payload, headers=headers, timeout=15)
-            resp.raise_for_status()
+            resp, retry_errors = request_with_retries(
+                "Microsoft Store Search API",
+                lambda: requests.post(STORE_SEARCH_URL, json=payload, headers=headers, timeout=15),
+                attempts=2,
+            )
             data = resp.json()
             
             results = []
@@ -473,11 +507,12 @@ class StoreAPI:
                     "Name": item.get("PackageName", "Unknown"),
                     "Publisher": item.get("Publisher", "Unknown"),
                 })
-            return results
+            return StoreAPI._source_diagnostic("Microsoft Store Search API", results=results, errors=retry_errors)
             
-        except Exception as e:
-            print(f"Search error: {e}")
-            return []
+        except StoreSourceError as exc:
+            return StoreAPI._source_diagnostic(exc.source_name, errors=exc.errors)
+        except Exception as exc:
+            return StoreAPI._source_diagnostic("Microsoft Store Search API", errors=[f"{type(exc).__name__}: {exc}"])
 
     @staticmethod
     def parse_release_notes_html(product_id, html_text, url):
@@ -556,25 +591,39 @@ class StoreAPI:
     @staticmethod
     def fetch_release_notes(product_id):
         url = f"https://apps.microsoft.com/detail/{product_id}?hl=en-US&gl=US"
-        response = requests.get(url, timeout=20, headers={"User-Agent": USER_AGENT})
-        response.raise_for_status()
+        response, _retry_errors = request_with_retries(
+            "Microsoft Store product page",
+            lambda: requests.get(url, timeout=20, headers={"User-Agent": USER_AGENT}),
+            attempts=2,
+        )
         return StoreAPI.parse_release_notes_html(product_id, response.text, response.url)
     
     @staticmethod
     def get_packages(product_id, ring="Retail"):
+        return StoreAPI.get_packages_with_diagnostics(product_id, ring)["Packages"]
+
+    @staticmethod
+    def get_packages_with_diagnostics(product_id, ring="Retail"):
         """Get downloadable packages for a product"""
+        payload = {"type": "ProductId", "url": product_id, "ring": ring, "lang": "en-US"}
+        headers = {"User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded"}
         try:
-            payload = {"type": "ProductId", "url": product_id, "ring": ring, "lang": "en-US"}
-            headers = {"User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded"}
-            
-            resp = requests.post(API_URL, data=payload, headers=headers, timeout=30)
-            resp.raise_for_status()
+            resp, retry_errors = request_with_retries(
+                "RG-Adguard package proxy",
+                lambda: requests.post(API_URL, data=payload, headers=headers, timeout=30),
+                attempts=2,
+            )
             
             soup = BeautifulSoup(resp.text, "html.parser")
             table = soup.find("table", class_="tftable")
             
             if not table:
-                return []
+                statuses = StoreAPI.detect_source_health()
+                return StoreAPI._source_diagnostic(
+                    "RG-Adguard package proxy",
+                    errors=retry_errors + ["RG-Adguard response did not include a package table"],
+                    fallbacks=package_lookup_fallbacks(product_id, statuses),
+                )
 
             results = []
             for row in table.find_all("tr"):
@@ -610,11 +659,22 @@ class StoreAPI:
                 }
                 results.append(annotate_package(package))
             
-            return results
+            return StoreAPI._source_diagnostic("RG-Adguard package proxy", packages=results, errors=retry_errors)
             
-        except Exception as e:
-            print(f"API error: {e}")
-            return []
+        except StoreSourceError as exc:
+            statuses = StoreAPI.detect_source_health()
+            return StoreAPI._source_diagnostic(
+                exc.source_name,
+                errors=exc.errors,
+                fallbacks=package_lookup_fallbacks(product_id, statuses),
+            )
+        except Exception as exc:
+            statuses = StoreAPI.detect_source_health()
+            return StoreAPI._source_diagnostic(
+                "RG-Adguard package proxy",
+                errors=[f"{type(exc).__name__}: {exc}"],
+                fallbacks=package_lookup_fallbacks(product_id, statuses),
+            )
     
     @staticmethod
     def get_file_size(url):
@@ -1772,6 +1832,7 @@ class MSStoreHelperApp(ctk.CTk):
         self.selected_packages = set()
         self.package_rows = []
         self.current_view = "welcome"
+        self.source_health = []
         self.arch_options = [f"Auto ({SYSTEM_ARCH})", "x64", "x86", "arm64", "arm", "neutral"]
         self.arch_override_var = ctk.StringVar(value=self.arch_options[0])
         self.package_scroll = None
@@ -1781,6 +1842,7 @@ class MSStoreHelperApp(ctk.CTk):
         
         self._build_ui()
         self._show_welcome()
+        threading.Thread(target=self._source_health_worker, daemon=True).start()
 
     def _target_arch(self):
         choice = self.arch_override_var.get()
@@ -2571,6 +2633,33 @@ Fixes "needs to be online" and similar errors.
         count = len(self.selected_packages)
         total_size = sum(p.get('SizeBytes', 0) or 0 for p in self.current_packages if p['FileName'] in self.selected_packages)
         self.selection_info.configure(text=f"{count} selected ({format_size(total_size)})")
+
+    def _source_health_worker(self):
+        self.after(0, lambda: self._log("INFO", "Checking Store source availability..."))
+        try:
+            statuses = StoreAPI.detect_source_health()
+        except Exception as exc:
+            self.after(0, lambda e=str(exc): self._log("WARNING", f"Source health check failed: {e}"))
+            return
+
+        self.source_health = statuses
+        for status in statuses:
+            level = "SUCCESS" if status.get("Available") else "WARNING"
+            self.after(0, lambda s=status, lvl=level: self._log(lvl, source_status_summary(s)))
+
+    def _log_source_diagnostic(self, diagnostic, item_name=None):
+        label = item_name or diagnostic.get("Source", "Store source")
+        for error in diagnostic.get("Errors", []):
+            self.after(0, lambda e=error, s=diagnostic.get("Source", "Store source"): self._log("ERROR", f"{s}: {e}"))
+        for fallback in diagnostic.get("Fallbacks", []):
+            command = fallback.get("Command", "")
+            detail = fallback.get("Detail", "")
+            self.after(0, lambda f=fallback, c=command, d=detail, n=label: self._log("WARNING", f"{n} fallback via {f.get('Source')}: {c} ({d})"))
+
+    def _get_packages_with_logging(self, app_data):
+        diagnostic = StoreAPI.get_packages_with_diagnostics(app_data["ProductId"])
+        self._log_source_diagnostic(diagnostic, app_data.get("Name"))
+        return diagnostic["Packages"]
     
     def _do_search(self):
         query = self.search_entry.get().strip()
@@ -2584,7 +2673,9 @@ Fixes "needs to be online" and similar errors.
     
     def _search_worker(self, query):
         self.after(0, lambda: self._log("INFO", f"Searching Microsoft Store for: {query}"))
-        results = StoreAPI.search_store(query)
+        diagnostic = StoreAPI.search_store_with_diagnostics(query)
+        results = diagnostic["Results"]
+        self._log_source_diagnostic(diagnostic, "Search")
         if results:
             self.after(0, lambda: self._log("SUCCESS", f"Found {len(results)} apps"))
             for r in results[:5]:
@@ -2662,7 +2753,7 @@ Fixes "needs to be online" and similar errors.
         queued_count = 0
         for app in missing_apps:
             self.after(0, lambda n=app["Name"]: self._update_status(f"📥 Queueing {n}...", Theme.INFO))
-            packages = StoreAPI.get_packages(app["ProductId"])
+            packages = self._get_packages_with_logging(app)
             if not packages:
                 self.after(0, lambda n=app["Name"]: self._log("WARNING", f"No packages found for missing LTSC component: {n}"))
                 continue
@@ -2699,7 +2790,7 @@ Fixes "needs to be online" and similar errors.
         all_packages = []
         for pin in XBOX_CORE_PACKAGE_PINS:
             self.after(0, lambda n=pin["Name"]: self._log("INFO", f"Fetching pinned Xbox core package: {n}"))
-            packages = StoreAPI.get_packages(pin["ProductId"])
+            packages = self._get_packages_with_logging(pin)
             if not packages:
                 self.after(0, lambda n=pin["Name"]: self._log("WARNING", f"No packages found for Xbox core item: {n}"))
             all_packages.extend(packages)
@@ -2735,7 +2826,7 @@ Fixes "needs to be online" and similar errors.
             names.append(app['Name'])
             self.after(0, lambda n=app['Name']: self._update_status(f"📥 Fetching {n}...", Theme.INFO))
             self.after(0, lambda n=app['Name'], pid=app['ProductId']: self._log("INFO", f"Fetching packages for: {n} ({pid})"))
-            packages = StoreAPI.get_packages(app['ProductId'])
+            packages = self._get_packages_with_logging(app)
             if packages:
                 self.after(0, lambda n=app['Name'], c=len(packages): self._log("SUCCESS", f"  Found {c} packages for {n}"))
             else:
@@ -2758,7 +2849,7 @@ Fixes "needs to be online" and similar errors.
     
     def _fetch_single_worker(self, app_data):
         self.after(0, lambda: self._log("INFO", f"Fetching packages for: {app_data['Name']} ({app_data['ProductId']})"))
-        packages = StoreAPI.get_packages(app_data['ProductId'])
+        packages = self._get_packages_with_logging(app_data)
         if not packages:
             self.after(0, lambda: self._update_status("⚠️ No packages found", Theme.WARNING))
             self.after(0, lambda: self._log("ERROR", f"No packages found for {app_data['Name']}"))

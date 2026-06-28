@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.21.0-blue)
+![Version](https://img.shields.io/badge/version-3.22.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -27,6 +27,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 🧭 **Architecture Override** - Force x64, x86, ARM64, ARM, or neutral package selection when needed
 - 🛡️ **Signature Verification** - Blocks installs unless the package signature chains to Microsoft
 - 🔐 **Verified Downloads** - Writes packages atomically and records SHA-256 metadata before cache reuse
+- **Source Health** - Detects StoreEdgeFD, RG-Adguard, WinGet, and Store CLI availability with fallback hints
 - 📥 **Download Queue** - Queue multiple packages with progress tracking
 - 📦 **Install Packages** - Install downloaded apps directly (requires Admin)
 - 🔧 **Store Repair** - Built-in repair preset for Store cache, TokenBroker, licensing, and connectivity issues
@@ -180,6 +181,7 @@ Packages are downloaded to `%USERPROFILE%\Downloads\MSStoreHelper` and installed
 ```
 MSStoreHelper/
 ├── MSStoreHelper.py               # Main application
+├── store_sources.py               # Store source health, retry, and fallback helpers
 ├── msstore_package_resolution.py  # Package selection and install ordering
 ├── tests/
 │   ├── test_package_resolution.py # Resolver tests
@@ -190,7 +192,8 @@ MSStoreHelper/
 │   ├── test_intune_export.py      # IntuneWin package tests
 │   ├── test_ltsc_workflow.py      # LTSC preset tests
 │   ├── test_user_profile.py       # Search history and favorites tests
-│   └── test_release_notes.py      # Store page release-note tests
+│   ├── test_release_notes.py      # Store page release-note tests
+│   └── test_store_sources.py      # Source health and fallback tests
 ├── README.md                      # This file
 ├── LICENSE                        # MIT License
 ├── icon.png / icon.ico            # App icon assets
@@ -204,7 +207,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.21.0"
+APP_VERSION = "3.22.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 
