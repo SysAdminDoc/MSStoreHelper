@@ -14,8 +14,13 @@ import ctypes
 import webbrowser
 import json
 import re
+import hashlib
 import shutil
 import tempfile
+try:
+    import winreg
+except ImportError:
+    winreg = None
 from tkinter import filedialog
 from datetime import datetime, timezone
 from msstore_package_resolution import (
@@ -67,11 +72,12 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.19.0"
+APP_VERSION = "3.20.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+CACHE_MANIFEST_NAME = "msstorehelper-cache-manifest.json"
 WINGET_IMPORT_SCHEMA = "https://aka.ms/winget-packages.schema.2.0.json"
 WINGET_MSSTORE_SOURCE = {
     "Argument": "https://storeedgefd.dsx.mp.microsoft.com/v9.0",
@@ -79,6 +85,7 @@ WINGET_MSSTORE_SOURCE = {
     "Name": "msstore",
     "Type": "Microsoft.Rest",
 }
+THEME_MODE_VALUES = ["System", "Dark", "Light"]
 WINDOWS_DIR = os.environ.get("WINDIR", r"C:\Windows")
 WINDOWS_POWERSHELL = os.path.join(WINDOWS_DIR, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 POWERSHELL_EXE = WINDOWS_POWERSHELL if os.path.exists(WINDOWS_POWERSHELL) else "powershell"
@@ -116,32 +123,124 @@ SYSTEM_ARCH = get_architecture()
 
 # ==================== COLOR THEME ====================
 class Theme:
+    DEFAULT_ACCENT = "#6366f1"
+    MODE = "Dark"
+
     # Main colors
-    BG_DARK = "#0f0f1a"
-    BG_CARD = "#1a1a2e"
-    BG_CARD_HOVER = "#252542"
-    BG_INPUT = "#16213e"
+    BG_DARK = ("#f5f7fb", "#0f0f1a")
+    BG_CARD = ("#ffffff", "#1a1a2e")
+    BG_CARD_HOVER = ("#e8eef8", "#252542")
+    BG_INPUT = ("#edf2f8", "#16213e")
     
     # Accent colors
-    PRIMARY = "#6366f1"
-    PRIMARY_HOVER = "#818cf8"
-    SUCCESS = "#10b981"
-    SUCCESS_HOVER = "#34d399"
-    WARNING = "#f59e0b"
-    DANGER = "#ef4444"
-    DANGER_HOVER = "#f87171"
-    INFO = "#06b6d4"
+    PRIMARY = DEFAULT_ACCENT
+    PRIMARY_HOVER = ("#4f46e5", "#818cf8")
+    SUCCESS = ("#059669", "#10b981")
+    SUCCESS_HOVER = ("#047857", "#34d399")
+    WARNING = ("#b45309", "#f59e0b")
+    DANGER = ("#dc2626", "#ef4444")
+    DANGER_HOVER = ("#b91c1c", "#f87171")
+    INFO = ("#0891b2", "#06b6d4")
     
     # Text colors
-    TEXT_PRIMARY = "#f8fafc"
-    TEXT_SECONDARY = "#94a3b8"
-    TEXT_MUTED = "#64748b"
+    TEXT_PRIMARY = ("#0f172a", "#f8fafc")
+    TEXT_SECONDARY = ("#475569", "#94a3b8")
+    TEXT_MUTED = ("#64748b", "#64748b")
     
     # Special
-    BORDER = "#2a2a4a"
-    BUNDLE_COLOR = "#22d3ee"
-    ENCRYPTED_COLOR = "#f87171"
-    ARCH_MATCH = "#4ade80"
+    BORDER = ("#cbd5e1", "#2a2a4a")
+    BUNDLE_COLOR = ("#0891b2", "#22d3ee")
+    ENCRYPTED_COLOR = ("#dc2626", "#f87171")
+    ARCH_MATCH = ("#16a34a", "#4ade80")
+
+    @staticmethod
+    def normalize_mode(mode):
+        value = str(mode or "System").strip().title()
+        return value if value in THEME_MODE_VALUES else "System"
+
+    @staticmethod
+    def sanitize_hex_color(color):
+        value = str(color or "").strip()
+        if re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            return value.lower()
+        return None
+
+    @staticmethod
+    def shift_hex_color(color, amount):
+        value = Theme.sanitize_hex_color(color) or Theme.DEFAULT_ACCENT
+        amount = max(-1.0, min(1.0, float(amount)))
+        channels = [int(value[i:i + 2], 16) for i in (1, 3, 5)]
+
+        shifted = []
+        for channel in channels:
+            if amount >= 0:
+                shifted.append(round(channel + (255 - channel) * amount))
+            else:
+                shifted.append(round(channel * (1 + amount)))
+        return "#" + "".join(f"{channel:02x}" for channel in shifted)
+
+    @staticmethod
+    def accent_from_windows_dword(value):
+        try:
+            raw = int(value)
+        except (TypeError, ValueError):
+            return None
+
+        red = raw & 0xFF
+        green = (raw >> 8) & 0xFF
+        blue = (raw >> 16) & 0xFF
+        return f"#{red:02x}{green:02x}{blue:02x}"
+
+    @staticmethod
+    def _read_registry_dword(path, name):
+        if winreg is None:
+            return None
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as key:
+                value, _value_type = winreg.QueryValueEx(key, name)
+            return int(value)
+        except OSError:
+            return None
+
+    @staticmethod
+    def windows_apps_use_light_theme():
+        value = Theme._read_registry_dword(
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            "AppsUseLightTheme",
+        )
+        if value is None:
+            return False
+        return bool(value)
+
+    @staticmethod
+    def read_windows_accent_color():
+        value = Theme._read_registry_dword(r"Software\Microsoft\Windows\DWM", "AccentColor")
+        return Theme.sanitize_hex_color(Theme.accent_from_windows_dword(value))
+
+    @staticmethod
+    def resolve_mode(mode, apps_use_light=None):
+        normalized = Theme.normalize_mode(mode)
+        if normalized == "System":
+            if apps_use_light is None:
+                apps_use_light = Theme.windows_apps_use_light_theme()
+            return "Light" if apps_use_light else "Dark"
+        return normalized
+
+    @classmethod
+    def configure_accent(cls, accent_color=None):
+        accent = cls.sanitize_hex_color(accent_color) or cls.DEFAULT_ACCENT
+        cls.PRIMARY = accent
+        cls.PRIMARY_HOVER = (
+            cls.shift_hex_color(accent, -0.14),
+            cls.shift_hex_color(accent, 0.22),
+        )
+        return accent
+
+    @classmethod
+    def set_mode(cls, mode, accent_color=None):
+        cls.MODE = cls.resolve_mode(mode)
+        cls.configure_accent(accent_color or cls.read_windows_accent_color())
+        return cls.MODE
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -278,7 +377,7 @@ class StoreAPI:
 
     @staticmethod
     def default_user_profile():
-        return {"SearchHistory": [], "PinnedFavorites": []}
+        return {"SearchHistory": [], "PinnedFavorites": [], "ThemeMode": "System"}
 
     @staticmethod
     def load_user_profile(path=USER_PROFILE_PATH):
@@ -294,6 +393,7 @@ class StoreAPI:
                 for item in data.get("PinnedFavorites", [])
                 if isinstance(item, dict) and item.get("Name") and item.get("ProductId")
             ][:20]
+            profile["ThemeMode"] = Theme.normalize_mode(data.get("ThemeMode", "System"))
             return profile
         except Exception:
             return StoreAPI.default_user_profile()
@@ -570,21 +670,107 @@ class StoreAPI:
             selected.append(package)
 
         return order_packages_for_install(selected, target_arch)
+
+    @staticmethod
+    def file_sha256(path, chunk_size=1024 * 1024):
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(chunk_size), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def artifact_metadata(package, artifact_path, source_url=None):
+        filename = package.get("FileName") or os.path.basename(artifact_path)
+        metadata = {
+            "FileName": filename,
+            "Path": os.path.abspath(artifact_path),
+            "SizeBytes": os.path.getsize(artifact_path),
+            "Sha256": StoreAPI.file_sha256(artifact_path),
+            "Url": source_url or package.get("Url", ""),
+            "PackageIdentity": package_identity(filename),
+            "AvailableVersion": format_version_tuple(package_version_tuple(filename)),
+        }
+        if package.get("PackageRoleLabel"):
+            metadata["PackageRoleLabel"] = package.get("PackageRoleLabel")
+        return metadata
+
+    @staticmethod
+    def _manifest_path(folder):
+        return os.path.join(folder, CACHE_MANIFEST_NAME)
+
+    @staticmethod
+    def load_cache_manifest(folder):
+        manifest_path = StoreAPI._manifest_path(folder)
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict) and isinstance(data.get("Artifacts"), dict):
+                return data
+        except Exception:
+            pass
+        return {"Version": 1, "Artifacts": {}}
+
+    @staticmethod
+    def save_cache_manifest(folder, manifest):
+        os.makedirs(folder, exist_ok=True)
+        manifest["Version"] = 1
+        manifest["UpdatedAt"] = datetime.now(timezone.utc).isoformat()
+        with open(StoreAPI._manifest_path(folder), "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2, sort_keys=True)
+
+    @staticmethod
+    def write_artifact_manifest(package, artifact_path, manifest_folder=None, source_url=None):
+        folder = manifest_folder or os.path.dirname(os.path.abspath(artifact_path))
+        metadata = StoreAPI.artifact_metadata(package, artifact_path, source_url)
+        manifest = StoreAPI.load_cache_manifest(folder)
+        manifest["Artifacts"][metadata["FileName"]] = metadata
+        StoreAPI.save_cache_manifest(folder, manifest)
+        package["LocalPath"] = artifact_path
+        package["SizeBytes"] = metadata["SizeBytes"]
+        package["Sha256"] = metadata["Sha256"]
+        package["CacheManifest"] = StoreAPI._manifest_path(folder)
+        return metadata
+
+    @staticmethod
+    def cached_artifact_is_valid(path, metadata):
+        if not os.path.exists(path) or not isinstance(metadata, dict):
+            return False
+        try:
+            expected_size = int(metadata.get("SizeBytes", -1))
+        except (TypeError, ValueError):
+            return False
+        expected_sha = str(metadata.get("Sha256", "")).lower()
+        return (
+            expected_size == os.path.getsize(path)
+            and bool(expected_sha)
+            and expected_sha == StoreAPI.file_sha256(path)
+        )
     
     @staticmethod
-    def download_file(url, filepath, progress_callback=None):
+    def download_file(url, filepath, progress_callback=None, package=None):
+        part_path = f"{filepath}.part"
         try:
+            os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
             with requests.get(url, stream=True, timeout=60) as r:
                 r.raise_for_status()
                 total = int(r.headers.get('content-length', 0))
                 
-                with open(filepath, 'wb') as f:
+                with open(part_path, 'wb') as f:
                     downloaded = 0
                     for chunk in r.iter_content(chunk_size=8192):
+                        if not chunk:
+                            continue
                         f.write(chunk)
                         downloaded += len(chunk)
                         if progress_callback and total:
                             progress_callback(downloaded / total)
+                if total and downloaded != total:
+                    return False, f"Downloaded {downloaded} bytes; expected {total} bytes"
+
+            os.replace(part_path, filepath)
+            if package is not None:
+                StoreAPI.write_artifact_manifest(package, filepath, source_url=url)
             return True, "Success"
         except Exception as e:
             return False, str(e)
@@ -604,10 +790,24 @@ class StoreAPI:
 
         os.makedirs(cache_path, exist_ok=True)
         destination = os.path.join(cache_path, filename)
-        if os.path.exists(destination) and os.path.getsize(destination) == os.path.getsize(local_path):
+        manifest = StoreAPI.load_cache_manifest(cache_path)
+        existing_metadata = manifest["Artifacts"].get(filename)
+        if StoreAPI.cached_artifact_is_valid(destination, existing_metadata):
             return True, f"Already cached: {destination}"
 
+        source_metadata = StoreAPI.artifact_metadata(package, local_path)
+        if os.path.exists(destination):
+            destination_metadata = {
+                "SizeBytes": os.path.getsize(destination),
+                "Sha256": StoreAPI.file_sha256(destination),
+            }
+            if StoreAPI.cached_artifact_is_valid(destination, destination_metadata) and destination_metadata["Sha256"] == source_metadata["Sha256"]:
+                manifest["Artifacts"][filename] = {**source_metadata, "Path": os.path.abspath(destination)}
+                StoreAPI.save_cache_manifest(cache_path, manifest)
+                return True, f"Already cached: {destination}"
+
         shutil.copy2(local_path, destination)
+        StoreAPI.write_artifact_manifest(package, destination, cache_path)
         return True, f"Cached: {destination}"
 
     @staticmethod
@@ -1401,7 +1601,10 @@ class MSStoreHelperApp(ctk.CTk):
         self.geometry("1280x800")
         self.minsize(1000, 600)
         
-        ctk.set_appearance_mode("Dark")
+        self.user_profile = StoreAPI.load_user_profile()
+        self.theme_mode_var = ctk.StringVar(value=Theme.normalize_mode(self.user_profile.get("ThemeMode", "System")))
+        Theme.set_mode(self.theme_mode_var.get())
+        ctk.set_appearance_mode(Theme.MODE)
         ctk.set_default_color_theme("dark-blue")
         self.configure(fg_color=Theme.BG_DARK)
         
@@ -1415,7 +1618,6 @@ class MSStoreHelperApp(ctk.CTk):
         self.arch_override_var = ctk.StringVar(value=self.arch_options[0])
         self.package_scroll = None
         self.output_path = DEFAULT_OUTPUT
-        self.user_profile = StoreAPI.load_user_profile()
         self.shared_cache_enabled = ctk.BooleanVar(value=False)
         self.shared_cache_path = os.path.join(DEFAULT_OUTPUT, "SharedCache")
         
@@ -1454,6 +1656,22 @@ class MSStoreHelperApp(ctk.CTk):
         
         ctk.CTkButton(info_frame, text="❓ Help", width=80, height=32, fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._show_help).pack(side="right", padx=5)
         
+        theme_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
+        theme_frame.pack(side="right", padx=(5, 10))
+        ctk.CTkLabel(theme_frame, text="Theme", font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY).pack(side="left", padx=(0, 6))
+        ctk.CTkOptionMenu(
+            theme_frame,
+            values=THEME_MODE_VALUES,
+            variable=self.theme_mode_var,
+            width=90,
+            height=32,
+            font=("Segoe UI", 12),
+            fg_color=Theme.BG_INPUT,
+            button_color=Theme.PRIMARY,
+            button_hover_color=Theme.PRIMARY_HOVER,
+            command=self._change_theme_mode,
+        ).pack(side="left")
+
         # LOG PANEL (at bottom - pack BEFORE main so it claims bottom space)
         self.log_panel = ctk.CTkFrame(self, fg_color=Theme.BG_CARD, corner_radius=0)
         self._build_log_panel()
@@ -1702,6 +1920,7 @@ class MSStoreHelperApp(ctk.CTk):
         self._log("INFO", f"System Architecture: {SYSTEM_ARCH}")
         self._log("INFO", f"Administrator: {'Yes' if IS_ADMIN else 'No'}")
         self._log("INFO", f"Output Directory: {DEFAULT_OUTPUT}")
+        self._log("INFO", f"Theme: {self.theme_mode_var.get()} ({Theme.MODE}) Accent: {Theme.PRIMARY}")
     
     def _toggle_log_panel(self):
         """Toggle log panel expanded/collapsed"""
@@ -2039,6 +2258,17 @@ Fixes "needs to be online" and similar errors.
 
     def _save_user_profile(self):
         StoreAPI.save_user_profile(self.user_profile)
+
+    def _change_theme_mode(self, choice):
+        mode = Theme.normalize_mode(choice)
+        self.theme_mode_var.set(mode)
+        self.user_profile["ThemeMode"] = mode
+        Theme.set_mode(mode)
+        ctk.set_appearance_mode(Theme.MODE)
+        self.configure(fg_color=Theme.BG_DARK)
+        self._save_user_profile()
+        self._update_status(f"Theme: {mode} ({Theme.MODE})", Theme.INFO)
+        self._log("INFO", f"Theme changed to {mode} ({Theme.MODE}) with accent {Theme.PRIMARY}")
 
     def _render_search_history(self):
         if not hasattr(self, "search_history_frame"):
@@ -2599,7 +2829,7 @@ Fixes "needs to be online" and similar errors.
             def progress_cb(val, idx=i, tot=total):
                 self.after(0, lambda v=(idx + val) / tot: self._update_progress(v))
             
-            success, error_msg = StoreAPI.download_file(pkg['Url'], filepath, progress_cb)
+            success, error_msg = StoreAPI.download_file(pkg['Url'], filepath, progress_cb, pkg)
             
             if '_status_widget' in pkg:
                 if success:

@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.19.0-blue)
+![Version](https://img.shields.io/badge/version-3.20.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -20,11 +20,13 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 🔎 **LTSC Gap Scan** - Detects missing LTSC components and queues the matching Store packages automatically
 - 🎮 **Xbox Core Queue** - Queues Xbox Identity and Gaming Services with known-good version pinning and fallback logging
 - ⭐ **User Profile** - Stores recent searches and pinned favorite apps per Windows user profile
+- 🎨 **Theme Modes** - Uses System, Dark, or Light mode with Windows accent-color matching
 - 📝 **Release Notes** - Fetches per-app notes from Microsoft Store product pages
 - ✨ **Smart Select** - Automatically picks the best packages and dependency frameworks (bundles, correct architecture, newest versions)
 - ⏭️ **Delta Detection** - Skips packages when the same or newer version is already installed
 - 🧭 **Architecture Override** - Force x64, x86, ARM64, ARM, or neutral package selection when needed
 - 🛡️ **Signature Verification** - Blocks installs unless the package signature chains to Microsoft
+- 🔐 **Verified Downloads** - Writes packages atomically and records SHA-256 metadata before cache reuse
 - 📥 **Download Queue** - Queue multiple packages with progress tracking
 - 📦 **Install Packages** - Install downloaded apps directly (requires Admin)
 - 🔧 **Store Repair** - Built-in repair preset for Store cache, TokenBroker, licensing, and connectivity issues
@@ -200,7 +202,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.19.0"
+APP_VERSION = "3.20.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 

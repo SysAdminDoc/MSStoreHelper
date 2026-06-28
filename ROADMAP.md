@@ -5,7 +5,6 @@ GUI tool to download/install Microsoft Store apps without the Store UI. Planned 
 ## Planned Features
 
 ### UX
-- Dark/light theme toggle matching OS accent color
 - Progress persistence across app restart (resumable downloads)
 
 ## Competitive Research
@@ -48,13 +47,6 @@ GUI tool to download/install Microsoft Store apps without the Store UI. Planned 
 - Checksum verification of downloaded packages against Store-signed hashes (K3rhos) — prevents MITM on unofficial API path
 
 ## Research-Driven Additions
-
-- [ ] P0 - Atomic verified downloads and cache manifest
-  Why: Downloads currently stream straight to final filenames and shared cache reuse trusts only file size.
-  Evidence: `MSStoreHelper.py:673`, `MSStoreHelper.py:695`, K3rhos downloader checksum pattern, Microsoft signed package model.
-  Touches: `MSStoreHelper.py`, new download/cache helpers, `tests/test_offline_cache.py`, new download recovery tests.
-  Acceptance: interrupted downloads leave `.part` files, completed artifacts record URL/size/SHA256/signature metadata, cache reuse verifies metadata before install/export.
-  Complexity: M
 
 - [ ] P0 - Repair rollback manifest and fail-visible PowerShell runner
   Why: Store repair/cache/licensing actions mutate user and system Store state but only return coarse step success.
