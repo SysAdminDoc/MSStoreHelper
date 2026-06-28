@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.18.0-blue)
+![Version](https://img.shields.io/badge/version-3.19.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -20,6 +20,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 🔎 **LTSC Gap Scan** - Detects missing LTSC components and queues the matching Store packages automatically
 - 🎮 **Xbox Core Queue** - Queues Xbox Identity and Gaming Services with known-good version pinning and fallback logging
 - ⭐ **User Profile** - Stores recent searches and pinned favorite apps per Windows user profile
+- 📝 **Release Notes** - Fetches per-app notes from Microsoft Store product pages
 - ✨ **Smart Select** - Automatically picks the best packages and dependency frameworks (bundles, correct architecture, newest versions)
 - ⏭️ **Delta Detection** - Skips packages when the same or newer version is already installed
 - 🧭 **Architecture Override** - Force x64, x86, ARM64, ARM, or neutral package selection when needed
@@ -81,6 +82,7 @@ python MSStoreHelper.py
 4. **Scan LTSC Gaps**: Click **"🔎 Scan LTSC Gaps"** to detect and queue missing tracked components
 5. **Xbox Core**: Click **"🎮 Queue Xbox Core"** to queue Xbox Identity and Gaming Services through the pinned install path
 6. **Pin Favorites**: Select apps and click **"Pin Selected"** to keep them in the sidebar for this Windows user
+7. **Release Notes**: Click **"Notes"** on an app row to fetch Microsoft Store page notes
 
 ### 📦 Downloading Packages
 
@@ -183,7 +185,8 @@ MSStoreHelper/
 │   ├── test_winget_export.py      # WinGet manifest tests
 │   ├── test_intune_export.py      # IntuneWin package tests
 │   ├── test_ltsc_workflow.py      # LTSC preset tests
-│   └── test_user_profile.py       # Search history and favorites tests
+│   ├── test_user_profile.py       # Search history and favorites tests
+│   └── test_release_notes.py      # Store page release-note tests
 ├── README.md                      # This file
 ├── LICENSE                        # MIT License
 ├── icon.png / icon.ico            # App icon assets
@@ -197,7 +200,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.18.0"
+APP_VERSION = "3.19.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 

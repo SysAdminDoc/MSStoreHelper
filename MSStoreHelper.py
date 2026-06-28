@@ -13,6 +13,7 @@ import threading
 import ctypes
 import webbrowser
 import json
+import re
 import shutil
 import tempfile
 from tkinter import filedialog
@@ -66,7 +67,7 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.18.0"
+APP_VERSION = "3.19.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -376,6 +377,87 @@ class StoreAPI:
         except Exception as e:
             print(f"Search error: {e}")
             return []
+
+    @staticmethod
+    def parse_release_notes_html(product_id, html_text, url):
+        soup = BeautifulSoup(html_text, "html.parser")
+        title = soup.title.get_text(" ", strip=True) if soup.title else product_id
+        notes = None
+        source = "store-page"
+
+        for script in soup.find_all("script"):
+            text = script.get_text(" ", strip=True)
+            if not text:
+                continue
+            for key in ("releaseNotes", "ReleaseNotes", "whatsNew", "WhatsNew", "whatIsNew"):
+                marker = f'"{key}"'
+                if marker not in text:
+                    continue
+                start = text.find(marker)
+                colon = text.find(":", start)
+                if colon == -1:
+                    continue
+                snippet = text[colon + 1:colon + 1200]
+                match = re.search(r'"((?:\\.|[^"\\])*)"', snippet)
+                if match and match.group(1).strip():
+                    notes = bytes(match.group(1), "utf-8").decode("unicode_escape").strip()
+                    source = key
+                    break
+            if notes:
+                break
+
+        if not notes:
+            headings = soup.find_all(lambda tag: tag.name in {"h1", "h2", "h3", "h4"} and tag.get_text(" ", strip=True).lower() in {
+                "what's new",
+                "whats new",
+                "what's new in this version",
+                "release notes",
+                "version notes",
+            })
+            for heading in headings:
+                pieces = []
+                for sibling in heading.find_next_siblings():
+                    if sibling.name in {"h1", "h2", "h3", "h4"}:
+                        break
+                    text = sibling.get_text("\n", strip=True)
+                    if text:
+                        pieces.append(text)
+                    if len("\n".join(pieces)) > 1200:
+                        break
+                if pieces:
+                    notes = "\n".join(pieces).strip()
+                    source = "heading"
+                    break
+
+        if not notes:
+            ld_json = soup.find("script", attrs={"type": "application/ld+json"})
+            if ld_json:
+                try:
+                    data = json.loads(ld_json.get_text())
+                    notes = data.get("description", "").strip()
+                    title = data.get("name", title)
+                    source = "product-description"
+                except Exception:
+                    notes = None
+
+        if not notes:
+            notes = "No release notes were published on the Microsoft Store product page."
+            source = "empty"
+
+        return {
+            "ProductId": product_id,
+            "Title": title,
+            "Url": url,
+            "Notes": notes,
+            "Source": source,
+        }
+
+    @staticmethod
+    def fetch_release_notes(product_id):
+        url = f"https://apps.microsoft.com/detail/{product_id}?hl=en-US&gl=US"
+        response = requests.get(url, timeout=20, headers={"User-Agent": USER_AGENT})
+        response.raise_for_status()
+        return StoreAPI.parse_release_notes_html(product_id, response.text, response.url)
     
     @staticmethod
     def get_packages(product_id, ring="Retail"):
@@ -1174,11 +1256,12 @@ class ModernCard(ctk.CTkFrame):
 
 
 class AppTile(ctk.CTkFrame):
-    def __init__(self, master, app_data, on_select):
+    def __init__(self, master, app_data, on_select, on_release_notes):
         super().__init__(master, fg_color="transparent")
         
         self.app_data = app_data
         self.on_select = on_select
+        self.on_release_notes = on_release_notes
         self.selected = ctk.BooleanVar(value=False)
         
         self.container = ctk.CTkFrame(self, fg_color=Theme.BG_CARD, corner_radius=10, border_width=1, border_color=Theme.BORDER)
@@ -1189,8 +1272,12 @@ class AppTile(ctk.CTkFrame):
         ctk.CTkLabel(self.container, text=app_data["Name"], font=("Segoe UI Semibold", 14), anchor="w").grid(row=0, column=1, sticky="sw", padx=5, pady=(12, 0))
         ctk.CTkLabel(self.container, text=app_data.get("Description", ""), font=("Segoe UI", 11), text_color=Theme.TEXT_SECONDARY, anchor="w").grid(row=1, column=1, sticky="nw", padx=5, pady=(0, 12))
         
-        self.chk = ctk.CTkCheckBox(self.container, text="", variable=self.selected, width=24, command=self._toggle, fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER)
-        self.chk.grid(row=0, column=2, rowspan=2, padx=15)
+        btn_frame = ctk.CTkFrame(self.container, fg_color="transparent")
+        btn_frame.grid(row=0, column=2, rowspan=2, padx=10)
+
+        ctk.CTkButton(btn_frame, text="Notes", width=58, height=28, font=("Segoe UI", 11), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=lambda: self.on_release_notes(self.app_data)).pack(side="left", padx=3)
+        self.chk = ctk.CTkCheckBox(btn_frame, text="", variable=self.selected, width=24, command=self._toggle, fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER)
+        self.chk.pack(side="left", padx=5)
         
         self.container.bind("<Enter>", lambda e: self.container.configure(fg_color=Theme.BG_CARD_HOVER))
         self.container.bind("<Leave>", lambda e: self.container.configure(fg_color=Theme.BG_CARD))
@@ -1200,7 +1287,7 @@ class AppTile(ctk.CTkFrame):
 
 
 class SearchResultTile(ctk.CTkFrame):
-    def __init__(self, master, app_data, on_fetch, on_select):
+    def __init__(self, master, app_data, on_fetch, on_select, on_release_notes):
         super().__init__(master, fg_color="transparent")
         
         self.app_data = app_data
@@ -1220,6 +1307,7 @@ class SearchResultTile(ctk.CTkFrame):
         btn_frame.grid(row=0, column=2, rowspan=2, padx=10)
         
         ctk.CTkButton(btn_frame, text="Get Files", width=80, height=30, font=("Segoe UI", 12), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=lambda: on_fetch(app_data)).pack(side="left", padx=3)
+        ctk.CTkButton(btn_frame, text="Notes", width=58, height=30, font=("Segoe UI", 11), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=lambda: on_release_notes(app_data)).pack(side="left", padx=3)
         ctk.CTkCheckBox(btn_frame, text="", variable=self.selected, width=24, command=lambda: on_select(app_data, self.selected.get()), fg_color=Theme.PRIMARY).pack(side="left", padx=5)
         
         self.container.bind("<Enter>", lambda e: self.container.configure(fg_color=Theme.BG_CARD_HOVER))
@@ -1739,7 +1827,7 @@ class MSStoreHelperApp(ctk.CTk):
         scroll.pack(fill="both", expand=True, padx=5, pady=5)
         
         for app in apps:
-            AppTile(scroll, app, self._on_app_toggle).pack(fill="x")
+            AppTile(scroll, app, self._on_app_toggle, self._show_release_notes).pack(fill="x")
     
     def _show_search_results(self, results, query):
         self._clear_content()
@@ -1771,7 +1859,7 @@ class MSStoreHelperApp(ctk.CTk):
         scroll.pack(fill="both", expand=True, padx=5, pady=5)
         
         for app in results:
-            SearchResultTile(scroll, app, self._fetch_single_app, self._on_app_toggle).pack(fill="x")
+            SearchResultTile(scroll, app, self._fetch_single_app, self._on_app_toggle, self._show_release_notes).pack(fill="x")
     
     def _show_packages(self, packages, title):
         self._clear_content()
@@ -1861,6 +1949,9 @@ Click "Get Files" or select apps and click "Get Selected Apps".
 📋 WinGet Export
 Select apps and click "Export WinGet" to save an import manifest.
 
+📝 Release Notes
+Click "Notes" on any app row to fetch Store product page notes.
+
 📦 IntuneWin Export
 Download queued packages, then export an IntuneWin package with a detection script.
 
@@ -1885,6 +1976,53 @@ Fixes "needs to be online" and similar errors.
         text_scroll.pack(fill="both", expand=True, pady=(15, 0))
         
         ctk.CTkLabel(text_scroll, text=help_text, font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY, justify="left", anchor="w", wraplength=430).pack(fill="x")
+
+    def _show_release_notes(self, app_data):
+        product_id = app_data.get("ProductId")
+        if not product_id:
+            self._update_status("⚠️ Missing product ID", Theme.WARNING)
+            return
+
+        self._update_status(f"📝 Fetching notes for {app_data.get('Name', 'app')}...", Theme.INFO)
+        threading.Thread(target=self._release_notes_worker, args=(app_data,), daemon=True).start()
+
+    def _release_notes_worker(self, app_data):
+        try:
+            notes = StoreAPI.fetch_release_notes(app_data["ProductId"])
+        except Exception as exc:
+            self.after(0, lambda: self._update_status("❌ Release notes failed", Theme.DANGER))
+            self.after(0, lambda e=str(exc), n=app_data.get("Name", "app"): self._log("ERROR", f"Failed to fetch release notes for {n}: {e}"))
+            return
+
+        self.after(0, lambda: self._update_status("Ready", Theme.TEXT_SECONDARY))
+        self.after(0, lambda: self._show_release_notes_dialog(app_data, notes))
+
+    def _show_release_notes_dialog(self, app_data, notes):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(f"Release Notes - {app_data.get('Name', 'App')}")
+        dialog.geometry("640x520")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        dialog.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - 640) // 2
+        y = self.winfo_y() + (self.winfo_height() - 520) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        content = ctk.CTkFrame(dialog, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=22, pady=22)
+
+        ctk.CTkLabel(content, text=app_data.get("Name", notes.get("Title", "Release Notes")), font=("Segoe UI Semibold", 20), anchor="w").pack(fill="x")
+        ctk.CTkLabel(content, text=f"Source: Microsoft Store ({notes.get('Source', 'store-page')})", font=("Segoe UI", 11), text_color=Theme.TEXT_MUTED, anchor="w").pack(fill="x", pady=(2, 12))
+
+        textbox = ctk.CTkTextbox(content, font=("Segoe UI", 12), fg_color=Theme.BG_DARK, text_color=Theme.TEXT_SECONDARY, wrap="word")
+        textbox.pack(fill="both", expand=True)
+        textbox.insert("1.0", notes.get("Notes", "No release notes found."))
+        textbox.configure(state="disabled")
+
+        button_row = ctk.CTkFrame(content, fg_color="transparent")
+        button_row.pack(fill="x", pady=(12, 0))
+        ctk.CTkButton(button_row, text="Open Store Page", width=130, height=32, font=("Segoe UI", 12), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=lambda: webbrowser.open(notes.get("Url", ""))).pack(side="right")
     
     def _update_status(self, text, color=None):
         self.progress_label.configure(text=text)
