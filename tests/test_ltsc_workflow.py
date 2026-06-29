@@ -24,6 +24,19 @@ class LtscWorkflowTests(unittest.TestCase):
 
         self.assertTrue(set(QUICK_FIX_PRESETS[preset_name]["apps"]).issubset(catalog_names))
 
+    def test_wsl_distro_preset_queues_store_distro_packages(self):
+        catalog = {
+            app["Name"]: app
+            for category in APP_CATALOG.values()
+            for app in category["apps"]
+        }
+        preset_name = next(name for name in QUICK_FIX_PRESETS if "WSL Distros" in name)
+
+        self.assertEqual(QUICK_FIX_PRESETS[preset_name]["apps"], ["Ubuntu", "Debian"])
+        self.assertEqual(catalog["Ubuntu"]["ProductId"], "9PDXGNCFSCZV")
+        self.assertEqual(catalog["Debian"]["ProductId"], "9MSVKQC78PK6")
+        self.assertTrue(set(QUICK_FIX_PRESETS[preset_name]["apps"]).issubset(catalog))
+
     def test_ltsc_requirement_apps_exist_in_catalog(self):
         catalog_names = {
             app["Name"]

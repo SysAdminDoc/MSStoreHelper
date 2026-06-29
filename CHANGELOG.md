@@ -2,6 +2,12 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.30.0] - 2026-06-29
+
+- Added Ubuntu and Debian WSL distribution catalog entries backed by Microsoft Store product IDs.
+- Added a WSL Distros quick-fix preset for queueing distro packages through the existing Store download workflow.
+- Added tests that pin the WSL distro product IDs and preset coverage.
+
 ## [v3.29.0] - 2026-06-29
 
 - Added persisted download queue state so queued packages and per-item status restore after app restart.

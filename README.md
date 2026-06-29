@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.29.0-blue)
+![Version](https://img.shields.io/badge/version-3.30.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -17,6 +17,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 📂 **Browse Categories** - Quick access to essential apps, gaming, productivity, dev tools & more
 - ⚡ **Quick Fix Presets** - One-click solutions for common needs (Repair Store, Gaming Setup, Media Codecs)
 - 🧰 **LTSC Essentials** - One-click preset for Terminal, PowerShell 7, WSL, Photos, Calculator, and Snipping Tool
+- **WSL Distro Sideload** - Queues Ubuntu and Debian Store distribution packages for offline WSL installs
 - 🔎 **LTSC Gap Scan** - Detects missing LTSC components and queues the matching Store packages automatically
 - 🎮 **Xbox Core Queue** - Queues Xbox Identity and Gaming Services with known-good version pinning and fallback logging
 - ⭐ **User Profile** - Stores recent searches and pinned favorite apps per Windows user profile
@@ -238,7 +239,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.29.0"
+APP_VERSION = "3.30.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 
@@ -256,6 +257,7 @@ The built-in catalog includes:
 | 🎮 Gaming | Xbox App, Xbox Game Bar, Gaming Services |
 | 🌐 Browsers | Firefox, Brave |
 | 🛠️ Developer Tools | VS Code, Python 3.12, PowerShell 7, WSL |
+| 🐧 WSL Distributions | Ubuntu, Debian |
 
 ---
 

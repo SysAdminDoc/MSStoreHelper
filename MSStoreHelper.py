@@ -90,7 +90,7 @@ from bs4 import BeautifulSoup
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.29.0"
+APP_VERSION = "3.30.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -366,6 +366,13 @@ APP_CATALOG = {
             {"Name": "WSL", "ProductId": "9P9TQF7MRM4R", "Description": "Linux on Windows", "Icon": "🐧"},
         ]
     },
+    "🐧 WSL Distributions": {
+        "description": "Linux distribution packages for WSL sideloading",
+        "apps": [
+            {"Name": "Ubuntu", "ProductId": "9PDXGNCFSCZV", "Description": "Ubuntu terminal environment for WSL", "Icon": "🐧"},
+            {"Name": "Debian", "ProductId": "9MSVKQC78PK6", "Description": "Debian command-line environment for WSL", "Icon": "🐧"},
+        ]
+    },
 }
 
 QUICK_FIX_PRESETS = {
@@ -388,6 +395,10 @@ QUICK_FIX_PRESETS = {
     "💻 Developer Pack": {
         "description": "Essential tools for developers: Terminal, PowerShell 7, and VS Code.",
         "apps": ["Windows Terminal", "PowerShell 7", "VS Code"]
+    },
+    "🐧 WSL Distros": {
+        "description": "Queue Ubuntu and Debian Store distribution packages for offline WSL sideloading.",
+        "apps": ["Ubuntu", "Debian"]
     },
 }
 
