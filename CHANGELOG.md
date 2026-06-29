@@ -2,6 +2,12 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.29.0] - 2026-06-29
+
+- Added persisted download queue state so queued packages and per-item status restore after app restart.
+- Changed downloads to resume existing `.part` files with HTTP Range requests and reuse already verified completed files.
+- Added tests for resumable downloads, verified-file reuse, and download state serialization.
+
 ## [v3.28.0] - 2026-06-29
 
 - Added App Installer `.appinstaller` export for downloaded AppX/MSIX queues with copied package folders and OnLaunch update settings.

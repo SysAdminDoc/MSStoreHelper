@@ -4,9 +4,6 @@ GUI tool to download/install Microsoft Store apps without the Store UI. Planned 
 
 ## Planned Features
 
-### UX
-- Progress persistence across app restart (resumable downloads)
-
 ## Competitive Research
 - **Winget** (Microsoft) — first-party, Store-backed source but opaque package discovery; use its manifest format for export interop.
 - **Scoop / Chocolatey** — community repos, stronger dependency graphs; lesson: surface dependencies explicitly in UI.

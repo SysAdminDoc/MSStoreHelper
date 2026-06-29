@@ -90,7 +90,7 @@ from bs4 import BeautifulSoup
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.28.0"
+APP_VERSION = "3.29.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -129,6 +129,7 @@ except:
 APP_DATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
 USER_PROFILE_PATH = os.path.join(APP_DATA_DIR, "profile.json")
 REPAIR_BACKUP_DIR = os.path.join(APP_DATA_DIR, "RepairBackups")
+DOWNLOAD_STATE_PATH = os.path.join(APP_DATA_DIR, "download-state.json")
 
 try:
     IS_ADMIN = ctypes.windll.shell32.IsUserAnAdmin() != 0
@@ -929,7 +930,7 @@ class StoreAPI:
         allowed_keys = [
             "FileName", "PackageIdentity", "PackageRoleLabel", "Architecture", "FileType",
             "IsBundle", "IsEncrypted", "SizeBytes", "SizeStr", "Sha256", "AvailableVersion",
-            "LocalPath", "CacheManifest", "StoreQuery",
+            "LocalPath", "CacheManifest", "StoreQuery", "DownloadStatus", "LastError",
         ]
         items = []
         for package in queue or []:
@@ -939,6 +940,64 @@ class StoreAPI:
                     item[key] = StoreAPI.redact_diagnostic_text(item[key])
             items.append(item)
         return items
+
+    @staticmethod
+    def download_state_queue_metadata(queue):
+        allowed_keys = [
+            "FileName", "Url", "Architecture", "FileType", "IsBundle", "IsEncrypted",
+            "SizeBytes", "SizeStr", "Sha256", "AvailableVersion", "PackageRole",
+            "PackageRoleLabel", "InstallOrder", "PackageIdentity", "LocalPath",
+            "CacheManifest", "StoreQuery", "DownloadStatus", "LastError",
+        ]
+        items = []
+        for package in queue or []:
+            if not isinstance(package, dict) or not package.get("FileName") or not package.get("Url"):
+                continue
+            item = {key: package.get(key) for key in allowed_keys if key in package}
+            items.append(item)
+        return items
+
+    @staticmethod
+    def write_download_state(queue, output_path, path=DOWNLOAD_STATE_PATH):
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        state = {
+            "Version": 1,
+            "UpdatedAt": datetime.now(timezone.utc).isoformat(),
+            "OutputPath": os.path.abspath(output_path),
+            "Queue": StoreAPI.download_state_queue_metadata(queue),
+        }
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(state, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        return path
+
+    @staticmethod
+    def load_download_state(path=DOWNLOAD_STATE_PATH):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            return {"Version": 1, "OutputPath": DEFAULT_OUTPUT, "Queue": []}
+
+        queue = []
+        for item in data.get("Queue", []):
+            if not isinstance(item, dict) or not item.get("FileName") or not item.get("Url"):
+                continue
+            queue.append(annotate_package(item.copy()))
+        return {
+            "Version": 1,
+            "OutputPath": data.get("OutputPath") or DEFAULT_OUTPUT,
+            "Queue": queue,
+            "UpdatedAt": data.get("UpdatedAt"),
+        }
+
+    @staticmethod
+    def clear_download_state(path=DOWNLOAD_STATE_PATH):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
 
     @staticmethod
     def collect_recent_repair_manifests(limit=5):
@@ -1033,12 +1092,29 @@ class StoreAPI:
         part_path = f"{filepath}.part"
         try:
             os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
-            with requests.get(url, stream=True, timeout=60) as r:
+            if package is not None and StoreAPI.cached_artifact_is_valid(filepath, package):
+                package["LocalPath"] = filepath
+                return True, "Already downloaded"
+
+            existing = os.path.getsize(part_path) if os.path.exists(part_path) else 0
+            headers = {"Range": f"bytes={existing}-"} if existing else None
+            with requests.get(url, stream=True, timeout=60, headers=headers) as r:
                 r.raise_for_status()
-                total = int(r.headers.get('content-length', 0))
+                status_code = int(getattr(r, "status_code", 200) or 200)
+                if existing and status_code != 206:
+                    existing = 0
+
+                content_range = r.headers.get("content-range", "")
+                total = 0
+                match = re.search(r"/(\d+)$", content_range)
+                if match:
+                    total = int(match.group(1))
+                elif r.headers.get('content-length'):
+                    total = int(r.headers.get('content-length', 0)) + existing
                 
-                with open(part_path, 'wb') as f:
-                    downloaded = 0
+                mode = "ab" if existing else "wb"
+                with open(part_path, mode) as f:
+                    downloaded = existing
                     for chunk in r.iter_content(chunk_size=8192):
                         if not chunk:
                             continue
@@ -2217,7 +2293,22 @@ class QueueItem(ctk.CTkFrame):
             role_label = pkg_info.get('PackageRoleLabel') or package_role_label(pkg_info['FileName'])
             ctk.CTkLabel(info_frame, text=role_label, font=("Segoe UI", 10), text_color=Theme.WARNING).pack(side="left", padx=(8, 0))
 
-        self.status_lbl = ctk.CTkLabel(info_frame, text="Waiting", font=("Segoe UI", 10), text_color=Theme.TEXT_MUTED)
+        status = pkg_info.get("DownloadStatus") or "Pending"
+        status_colors = {
+            "Downloaded": Theme.SUCCESS,
+            "Partial": Theme.WARNING,
+            "Failed": Theme.DANGER,
+            "Downloading": Theme.INFO,
+            "Pending": Theme.TEXT_MUTED,
+        }
+        status_text = {
+            "Downloaded": "✅ Done",
+            "Partial": "Partial",
+            "Failed": "❌ Failed",
+            "Downloading": "Downloading...",
+            "Pending": "Waiting",
+        }.get(status, "Waiting")
+        self.status_lbl = ctk.CTkLabel(info_frame, text=status_text, font=("Segoe UI", 10), text_color=status_colors.get(status, Theme.TEXT_MUTED))
         self.status_lbl.pack(side="right")
         
         pkg_info['_status_widget'] = self.status_lbl
@@ -2244,7 +2335,6 @@ class MSStoreHelperApp(ctk.CTk):
         self.configure(fg_color=Theme.BG_DARK)
         
         self.selected_apps = []
-        self.download_queue = []
         self.current_packages = []
         self.selected_packages = set()
         self.package_rows = []
@@ -2253,12 +2343,18 @@ class MSStoreHelperApp(ctk.CTk):
         self.arch_options = [f"Auto ({SYSTEM_ARCH})", "x64", "x86", "arm64", "arm", "neutral"]
         self.arch_override_var = ctk.StringVar(value=self.arch_options[0])
         self.package_scroll = None
-        self.output_path = DEFAULT_OUTPUT
+        download_state = StoreAPI.load_download_state()
+        self.output_path = download_state.get("OutputPath") or DEFAULT_OUTPUT
+        self.download_queue = download_state.get("Queue", [])
         self.shared_cache_enabled = ctk.BooleanVar(value=False)
         self.shared_cache_path = os.path.join(DEFAULT_OUTPUT, "SharedCache")
         
         self._build_ui()
+        if self.download_queue:
+            self._update_queue_ui()
         self._show_welcome()
+        if self.download_queue:
+            self._log("INFO", f"Restored {len(self.download_queue)} queued download(s) from previous session")
         if os.environ.get("MSSTOREHELPER_SKIP_SOURCE_HEALTH") != "1":
             threading.Thread(target=self._source_health_worker, daemon=True).start()
 
@@ -2843,6 +2939,7 @@ Automatically picks the best files - prefers bundles, skips encrypted files, cho
 
 ⬇️ Downloading
 Add files to queue and click "Download All". Files save to Downloads folder.
+Interrupted downloads resume from .part files when the server supports Range requests.
 
 📦 Installing
 Click "Install Downloaded" after downloading. Requires Administrator.
@@ -3319,13 +3416,14 @@ Fixes "needs to be online" and similar errors.
             for package in recommended:
                 if any(queued["FileName"] == package["FileName"] for queued in self.download_queue):
                     continue
-                self.download_queue.append(annotate_package(package.copy()))
-                queued_count += 1
+            self.download_queue.append(annotate_package(package.copy()))
+            queued_count += 1
 
         self.download_queue = StoreAPI.order_packages_for_install(self.download_queue, target_arch)
         dependency_count = sum(1 for pkg in self.download_queue if is_dependency_package(pkg))
 
         if queued_count:
+            self._save_download_state()
             self.after(0, self._update_queue_ui)
             self.after(0, lambda c=queued_count: self._update_status(f"✅ Queued {c} LTSC package(s)", Theme.SUCCESS))
             self.after(0, lambda c=queued_count, d=dependency_count: self._log("SUCCESS", f"Queued {c} package(s) for missing LTSC components; dependencies in queue: {d}"))
@@ -3369,6 +3467,7 @@ Fixes "needs to be online" and similar errors.
 
         self.download_queue = StoreAPI.order_packages_for_install(self.download_queue, target_arch)
         if queued_count:
+            self._save_download_state()
             self.after(0, self._update_queue_ui)
             self.after(0, lambda c=queued_count: self._update_status(f"✅ Queued {c} Xbox core package(s)", Theme.SUCCESS))
             self.after(0, lambda c=queued_count: self._log("SUCCESS", f"Queued {c} Xbox core package(s) with dependency-first ordering"))
@@ -3491,6 +3590,7 @@ Fixes "needs to be online" and similar errors.
         self.download_queue = StoreAPI.order_packages_for_install(self.download_queue, self._target_arch())
         dependency_count = sum(1 for pkg in self.download_queue if is_dependency_package(pkg))
 
+        self._save_download_state()
         self._update_queue_ui()
         self._update_status(f"✅ Added {count} files to queue", Theme.SUCCESS)
         self._log("INFO", f"Added {count} files to download queue (total: {len(self.download_queue)})")
@@ -3508,10 +3608,17 @@ Fixes "needs to be online" and similar errors.
                 QueueItem(self.queue_scroll, pkg).pack(fill="x", pady=3, padx=5)
         
         self.queue_count.configure(text=f"{len(self.download_queue)} items")
+
+    def _save_download_state(self):
+        if self.download_queue:
+            StoreAPI.write_download_state(self.download_queue, self.output_path)
+        else:
+            StoreAPI.clear_download_state()
     
     def _clear_queue(self):
         self.download_queue.clear()
         self._update_queue_ui()
+        self._save_download_state()
         self._update_status("Queue cleared", Theme.TEXT_SECONDARY)
     
     def _start_download(self):
@@ -3686,6 +3793,7 @@ Fixes "needs to be online" and similar errors.
             self.after(0, lambda: self._log("INFO", f"Created output directory: {self.output_path}"))
         
         self.after(0, lambda: self._log("INFO", f"Starting download of {len(self.download_queue)} files"))
+        self._save_download_state()
         
         total = len(self.download_queue)
         success_count = 0
@@ -3700,6 +3808,9 @@ Fixes "needs to be online" and similar errors.
             
             filepath = os.path.join(self.output_path, fname)
             pkg['LocalPath'] = filepath
+            pkg["DownloadStatus"] = "Downloading"
+            pkg.pop("LastError", None)
+            self._save_download_state()
             
             def progress_cb(val, idx=i, tot=total):
                 self.after(0, lambda v=(idx + val) / tot: self._update_progress(v))
@@ -3708,15 +3819,24 @@ Fixes "needs to be online" and similar errors.
             
             if '_status_widget' in pkg:
                 if success:
+                    pkg["DownloadStatus"] = "Downloaded"
+                    pkg.pop("LastError", None)
+                    self._save_download_state()
                     self.after(0, lambda w=pkg['_status_widget']: w.configure(text="✅ Done", text_color=Theme.SUCCESS))
                     self.after(0, lambda n=fname: self._log("SUCCESS", f"  Downloaded: {n}"))
                     success_count += 1
                     if self.shared_cache_enabled.get():
                         cache_success, cache_msg = StoreAPI.cache_downloaded_artifact(pkg, self.shared_cache_path)
+                        self._save_download_state()
                         level = "SUCCESS" if cache_success else "WARNING"
                         self.after(0, lambda lvl=level, m=cache_msg: self._log(lvl, f"  Shared cache: {m}"))
                 else:
-                    self.after(0, lambda w=pkg['_status_widget']: w.configure(text="❌ Failed", text_color=Theme.DANGER))
+                    pkg["DownloadStatus"] = "Partial" if os.path.exists(f"{filepath}.part") else "Failed"
+                    pkg["LastError"] = error_msg
+                    self._save_download_state()
+                    status_text = "Partial" if pkg["DownloadStatus"] == "Partial" else "❌ Failed"
+                    status_color = Theme.WARNING if pkg["DownloadStatus"] == "Partial" else Theme.DANGER
+                    self.after(0, lambda w=pkg['_status_widget'], t=status_text, c=status_color: w.configure(text=t, text_color=c))
                     self.after(0, lambda n=fname, e=error_msg: self._log("ERROR", f"  Failed to download {n}: {e}"))
         
         self.after(0, lambda: self._update_progress(0))

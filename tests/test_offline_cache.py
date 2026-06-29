@@ -10,12 +10,15 @@ from MSStoreHelper import StoreAPI
 
 
 class FakeDownloadResponse:
-    def __init__(self, chunks, content_length=None, error_at=None):
+    def __init__(self, chunks, content_length=None, error_at=None, status_code=200, content_range=None):
         self.chunks = chunks
         self.headers = {}
         if content_length is not None:
             self.headers["content-length"] = str(content_length)
+        if content_range is not None:
+            self.headers["content-range"] = content_range
         self.error_at = error_at
+        self.status_code = status_code
 
     def __enter__(self):
         return self
@@ -129,6 +132,50 @@ class OfflineCacheTests(unittest.TestCase):
             self.assertEqual(package["Sha256"], StoreAPI.file_sha256(target))
             self.assertTrue(os.path.exists(os.path.join(temp_dir, "msstorehelper-cache-manifest.json")))
 
+    def test_download_file_resumes_existing_part_with_range_request(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = os.path.join(temp_dir, "Contoso.App_1.0.0.0_x64__test.msix")
+            with open(f"{target}.part", "wb") as handle:
+                handle.write(b"pack")
+
+            captured = {}
+
+            def fake_get(_url, **kwargs):
+                captured["headers"] = kwargs.get("headers")
+                return FakeDownloadResponse(
+                    [b"age"],
+                    content_length=3,
+                    status_code=206,
+                    content_range="bytes 4-6/7",
+                )
+
+            with patch("MSStoreHelper.requests.get", side_effect=fake_get):
+                ok, message = StoreAPI.download_file("https://example.invalid/app.msix", target)
+
+            self.assertTrue(ok, message)
+            self.assertEqual(captured["headers"], {"Range": "bytes=4-"})
+            self.assertFalse(os.path.exists(f"{target}.part"))
+            with open(target, "rb") as handle:
+                self.assertEqual(handle.read(), b"package")
+
+    def test_download_file_reuses_existing_verified_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = os.path.join(temp_dir, "Contoso.App_1.0.0.0_x64__test.msix")
+            with open(target, "wb") as handle:
+                handle.write(b"package")
+            package = {
+                "FileName": os.path.basename(target),
+                "SizeBytes": 7,
+                "Sha256": StoreAPI.file_sha256(target),
+            }
+
+            with patch("MSStoreHelper.requests.get") as get_mock:
+                ok, message = StoreAPI.download_file("https://example.invalid/app.msix", target, package=package)
+
+            self.assertTrue(ok, message)
+            self.assertEqual(message, "Already downloaded")
+            get_mock.assert_not_called()
+
     def test_download_file_keeps_part_file_on_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = os.path.join(temp_dir, "Contoso.App_1.0.0.0_x64__test.msix")
@@ -142,6 +189,29 @@ class OfflineCacheTests(unittest.TestCase):
             self.assertTrue(os.path.exists(f"{target}.part"))
             with open(f"{target}.part", "rb") as handle:
                 self.assertEqual(handle.read(), b"partial")
+
+    def test_download_state_round_trips_queue_without_widgets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = os.path.join(temp_dir, "download-state.json")
+            package = {
+                "FileName": "Contoso.App_1.0.0.0_x64__test.msix",
+                "Url": "https://example.invalid/app.msix",
+                "Architecture": "x64",
+                "DownloadStatus": "Partial",
+                "LastError": "network dropped",
+                "_status_widget": object(),
+            }
+
+            StoreAPI.write_download_state([package], temp_dir, state_path)
+            loaded = StoreAPI.load_download_state(state_path)
+
+            self.assertEqual(loaded["OutputPath"], os.path.abspath(temp_dir))
+            self.assertEqual(loaded["Queue"][0]["FileName"], package["FileName"])
+            self.assertEqual(loaded["Queue"][0]["DownloadStatus"], "Partial")
+            self.assertNotIn("_status_widget", loaded["Queue"][0])
+
+            StoreAPI.clear_download_state(state_path)
+            self.assertFalse(os.path.exists(state_path))
 
 
 if __name__ == "__main__":
