@@ -9,6 +9,7 @@ import sys
 import subprocess
 import os
 import platform
+import argparse
 import threading
 import ctypes
 import webbrowser
@@ -92,7 +93,7 @@ from bs4 import BeautifulSoup
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.33.0"
+APP_VERSION = "3.34.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -491,6 +492,72 @@ class StoreAPI:
         metadata = StoreAPI.store_query_settings(ring, language, market)
         metadata["ProductId"] = str(product_id or "").strip()
         return metadata
+
+    @staticmethod
+    def catalog_apps():
+        apps = []
+        for category_name, category in APP_CATALOG.items():
+            for app in category.get("apps", []):
+                item = StoreAPI.normalize_favorite_app(app)
+                item["Category"] = category_name
+                apps.append(item)
+        return apps
+
+    @staticmethod
+    def catalog_identity_map():
+        apps_by_name = {app["Name"].lower(): app for app in StoreAPI.catalog_apps()}
+        identities = {}
+        for requirement in LTSC_COMPONENT_REQUIREMENTS:
+            app = apps_by_name.get(str(requirement.get("Name", "")).lower())
+            if not app:
+                continue
+            for identity in requirement.get("Identities", []):
+                identities[str(identity).lower()] = app
+        for pin in XBOX_CORE_PACKAGE_PINS:
+            app = apps_by_name.get(str(pin.get("Name", "")).lower())
+            if app and pin.get("Identity"):
+                identities[str(pin["Identity"]).lower()] = app
+        return identities
+
+    @staticmethod
+    def resolve_cli_app(identifier, searcher=None):
+        text = str(identifier or "").strip()
+        if not text:
+            return None, "App identifier is required"
+
+        text_lower = text.lower()
+        for app in StoreAPI.catalog_apps():
+            app_name = app.get("Name", "")
+            product_id = app.get("ProductId", "")
+            if text_lower == app_name.lower():
+                resolved = app.copy()
+                resolved["ResolvedFrom"] = "catalog-name"
+                return resolved, None
+            if text_lower == product_id.lower():
+                resolved = app.copy()
+                resolved["ResolvedFrom"] = "product-id"
+                return resolved, None
+
+        identity_app = StoreAPI.catalog_identity_map().get(text_lower)
+        if identity_app:
+            resolved = identity_app.copy()
+            resolved["ResolvedFrom"] = "package-identity"
+            resolved["PackageIdentity"] = text
+            return resolved, None
+
+        searcher = searcher or StoreAPI.search_store_with_diagnostics
+        diagnostic = searcher(text, max_results=5)
+        results = diagnostic.get("Results", []) if isinstance(diagnostic, dict) else []
+        for result in results:
+            if result.get("ProductId"):
+                resolved = StoreAPI.normalize_favorite_app(result)
+                resolved["ResolvedFrom"] = "store-search"
+                return resolved, None
+
+        errors = diagnostic.get("Errors", []) if isinstance(diagnostic, dict) else []
+        if errors:
+            return None, "; ".join(errors)
+        return None, f"No Store app matched '{text}'"
 
     @staticmethod
     def load_user_profile(path=USER_PROFILE_PATH):
@@ -4845,10 +4912,231 @@ Fixes "needs to be online" and similar errors.
             self.after(0, lambda: self._log("WARNING", f"Cache rebuild partially complete: {success_count}/{len(results)} steps succeeded"))
 
 
-def main():
+def build_cli_parser():
+    parser = argparse.ArgumentParser(
+        prog="MSStoreHelper.py",
+        description="Headless Microsoft Store package search, download, and install workflow.",
+    )
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--search", metavar="QUERY", help="Search Microsoft Store without opening the GUI.")
+    action.add_argument("--download", metavar="APP_OR_PRODUCT_ID", help="Resolve, select, and download Store packages.")
+    action.add_argument("--install", metavar="APP_OR_PRODUCT_ID", help="Download and install selected Store packages.")
+    parser.add_argument("--output", default=DEFAULT_OUTPUT, help=f"Download folder. Default: {DEFAULT_OUTPUT}")
+    parser.add_argument("--arch", choices=["auto", "x64", "x86", "arm64", "arm", "neutral"], default="auto")
+    parser.add_argument("--ring", choices=STORE_RING_VALUES, default="Retail")
+    parser.add_argument("--language", default="en-US")
+    parser.add_argument("--market", default="US")
+    parser.add_argument("--json", action="store_true", help="Emit a machine-readable JSON summary.")
+    return parser
+
+
+def _cli_print(message, stream):
+    print(message, file=stream)
+
+
+def _cli_emit_summary(summary, as_json, stdout):
+    if as_json:
+        _cli_print(json.dumps(summary, indent=2), stdout)
+        return
+
+    action = summary.get("Action", "")
+    app = summary.get("App", {})
+    if app:
+        _cli_print(f"{action}: {app.get('Name')} ({app.get('ProductId')})", stdout)
+    else:
+        _cli_print(action, stdout)
+
+    for item in summary.get("Packages", []):
+        name = item.get("FileName", "")
+        status = item.get("Status", "")
+        message = item.get("Message", "")
+        _cli_print(f"- {status}: {name} {message}".rstrip(), stdout)
+
+
+def _cli_package_record(package, status, message="", path=None):
+    return {
+        "FileName": package.get("FileName", ""),
+        "PackageIdentity": package.get("PackageIdentity") or package_identity(package.get("FileName", "")),
+        "Version": package.get("AvailableVersion") or format_version_tuple(package_version_tuple(package.get("FileName", ""))),
+        "Architecture": package.get("Architecture", "neutral"),
+        "FileType": package.get("FileType", ""),
+        "Status": status,
+        "Message": message,
+        "LocalPath": path or package.get("LocalPath", ""),
+    }
+
+
+def _cli_set_package_record(records, package, status, message="", path=None):
+    updated = _cli_package_record(package, status, message, path)
+    filename = updated.get("FileName", "")
+    for index, record in enumerate(records):
+        if record.get("FileName") == filename:
+            records[index] = updated
+            return
+    records.append(updated)
+
+
+def _cli_search(query, args, stdout, stderr):
+    diagnostic = StoreAPI.search_store_with_diagnostics(query)
+    results = diagnostic.get("Results", [])
+    summary = {
+        "Action": "search",
+        "Query": query,
+        "Source": diagnostic.get("Source", "Microsoft Store Search API"),
+        "Errors": diagnostic.get("Errors", []),
+        "Results": results,
+    }
+    for error in summary["Errors"]:
+        _cli_print(f"warning: {error}", stderr)
+
+    if args.json:
+        _cli_print(json.dumps(summary, indent=2), stdout)
+    else:
+        _cli_print(f"Search: {query}", stdout)
+        for result in results:
+            _cli_print(f"- {result.get('Name', 'Unknown')} ({result.get('ProductId', '')})", stdout)
+
+    return 0 if results else 1
+
+
+def _cli_download_selected(packages, output_path, stderr):
+    records = []
+    downloaded = []
+    os.makedirs(output_path, exist_ok=True)
+    for package in packages:
+        filename = package.get("FileName", "")
+        if not filename:
+            records.append(_cli_package_record(package, "failed", "Package filename is missing"))
+            continue
+        path = os.path.join(output_path, filename)
+        ok, message = StoreAPI.download_file(package.get("Url", ""), path, package=package)
+        if ok:
+            package["LocalPath"] = path
+            downloaded.append(package)
+            records.append(_cli_package_record(package, "downloaded", message, path))
+        else:
+            _cli_print(f"download failed: {filename}: {message}", stderr)
+            records.append(_cli_package_record(package, "failed", message, path))
+    return downloaded, records
+
+
+def _cli_install_downloaded(packages, records, stderr):
+    success_count = 0
+    skipped_count = 0
+    failed_count = 0
+
+    for package in packages:
+        local_path = package.get("LocalPath", "")
+        if not local_path or not os.path.exists(local_path):
+            failed_count += 1
+            _cli_set_package_record(records, package, "failed", "Downloaded file is missing", local_path)
+            continue
+
+        should_skip, installed_version, package_name = StoreAPI.should_skip_installed_package(package)
+        if should_skip:
+            skipped_count += 1
+            _cli_set_package_record(records, package, "skipped", f"installed {installed_version} is current", local_path)
+            continue
+
+        signature_ok, signature_message = StoreAPI.verify_package_signature(local_path)
+        if not signature_ok:
+            failed_count += 1
+            _cli_print(f"signature blocked: {package.get('FileName')}: {signature_message}", stderr)
+            _cli_set_package_record(records, package, "failed", f"signature blocked: {signature_message}", local_path)
+            continue
+
+        ok, install_message = StoreAPI.install_package(local_path)
+        if ok:
+            success_count += 1
+            _cli_set_package_record(records, package, "installed", install_message, local_path)
+            continue
+
+        if StoreAPI.is_noop_install_error(install_message):
+            skipped_count += 1
+            _cli_set_package_record(records, package, "skipped", f"{package_name}: {install_message}", local_path)
+            continue
+
+        failed_count += 1
+        _cli_print(f"install failed: {package.get('FileName')}: {install_message}", stderr)
+        _cli_set_package_record(records, package, "failed", install_message, local_path)
+
+    return success_count, skipped_count, failed_count
+
+
+def _cli_package_workflow(args, stdout, stderr):
+    identifier = args.download or args.install
+    app, resolve_error = StoreAPI.resolve_cli_app(identifier)
+    if not app:
+        _cli_print(f"error: {resolve_error}", stderr)
+        return 1
+
+    target_arch = SYSTEM_ARCH if args.arch == "auto" else args.arch
+    diagnostic = StoreAPI.get_packages_with_diagnostics(app["ProductId"], args.ring, args.language, args.market)
+    errors = diagnostic.get("Errors", [])
+    for error in errors:
+        _cli_print(f"warning: {error}", stderr)
+
+    selected = StoreAPI.smart_select(
+        diagnostic.get("Packages", []),
+        target_arch,
+        prefer_exact_arch=args.arch != "auto",
+    )
+    selected = StoreAPI.order_packages_for_install(selected, target_arch)
+    if not selected:
+        _cli_print(f"error: no installable packages were selected for {app.get('Name')}", stderr)
+        return 1
+
+    downloaded, records = _cli_download_selected(selected, os.path.abspath(args.output), stderr)
+    action = "install" if args.install else "download"
+    summary = {
+        "Action": action,
+        "App": app,
+        "TargetArchitecture": target_arch,
+        "OutputPath": os.path.abspath(args.output),
+        "StoreQuery": diagnostic.get("Query", StoreAPI.package_query_metadata(app["ProductId"], args.ring, args.language, args.market)),
+        "Errors": errors,
+        "Packages": records,
+    }
+
+    if len(downloaded) != len(selected):
+        _cli_emit_summary(summary, args.json, stdout)
+        return 1
+
+    if args.install:
+        if not IS_ADMIN:
+            _cli_print("error: administrator rights are required for --install", stderr)
+            _cli_emit_summary(summary, args.json, stdout)
+            return 2
+        installed, skipped, failed = _cli_install_downloaded(downloaded, records, stderr)
+        summary["Installed"] = installed
+        summary["Skipped"] = skipped
+        summary["Failed"] = failed
+        _cli_emit_summary(summary, args.json, stdout)
+        return 0 if failed == 0 else 1
+
+    _cli_emit_summary(summary, args.json, stdout)
+    return 0
+
+
+def run_cli(argv=None, stdout=None, stderr=None):
+    stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
+    parser = build_cli_parser()
+    args = parser.parse_args(argv)
+    if args.search:
+        return _cli_search(args.search, args, stdout, stderr)
+    return _cli_package_workflow(args, stdout, stderr)
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv:
+        return run_cli(argv)
+
     app = MSStoreHelperApp()
     app.mainloop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

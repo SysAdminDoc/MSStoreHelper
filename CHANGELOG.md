@@ -2,6 +2,12 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.34.0] - 2026-06-29
+
+- Added a headless CLI for Store search, package download, and elevated install workflows without opening the GUI.
+- Added catalog, product ID, and package-identity resolution so RMM scripts can call commands like `MSStoreHelper.py --install Microsoft.WindowsTerminal`.
+- Added tests for CLI JSON output, non-GUI dispatch, package download orchestration, and installed-version skip handling.
+
 ## [v3.33.0] - 2026-06-29
 
 - Added cached package manifest diffs for capabilities and dependencies between the newest two cached versions.

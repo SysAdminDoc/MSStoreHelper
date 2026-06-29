@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "msstorehelper"
-version = "3.33.0"
+version = "3.34.0"
 description = "GUI tool to download and install Microsoft Store apps without the Store UI."
 readme = "README.md"
 requires-python = ">=3.8"
