@@ -48,6 +48,8 @@ class UserProfileTests(unittest.TestCase):
             profile["StoreRing"] = "WIS"
             profile["StoreLanguage"] = "de-DE"
             profile["StoreMarket"] = "DE"
+            profile["KeepUpdatedEnabled"] = True
+            profile["KeepUpdatedLastScan"] = "2026-06-29T12:00:00+00:00"
 
             StoreAPI.save_user_profile(profile, profile_path)
             loaded = StoreAPI.load_user_profile(profile_path)
@@ -55,6 +57,8 @@ class UserProfileTests(unittest.TestCase):
             self.assertEqual(loaded["StoreRing"], "WIS")
             self.assertEqual(loaded["StoreLanguage"], "de-DE")
             self.assertEqual(loaded["StoreMarket"], "DE")
+            self.assertTrue(loaded["KeepUpdatedEnabled"])
+            self.assertEqual(loaded["KeepUpdatedLastScan"], "2026-06-29T12:00:00+00:00")
 
     def test_invalid_store_query_settings_fall_back_to_defaults(self):
         with tempfile.TemporaryDirectory() as temp_dir:

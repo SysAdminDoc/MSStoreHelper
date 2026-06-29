@@ -28,6 +28,7 @@ from tkinter import filedialog
 from datetime import datetime, timezone
 from msstore_package_resolution import (
     annotate_package,
+    compare_version_tuples,
     format_version_tuple,
     installed_version_satisfies_package,
     is_dependency_package,
@@ -39,6 +40,7 @@ from msstore_package_resolution import (
     package_role_label,
     select_recommended_packages,
     signature_info_is_valid_microsoft,
+    version_tuple_from_text,
 )
 from store_sources import (
     StoreSourceError,
@@ -90,7 +92,7 @@ from bs4 import BeautifulSoup
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.30.0"
+APP_VERSION = "3.31.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -107,6 +109,8 @@ THEME_MODE_VALUES = ["System", "Dark", "Light"]
 STORE_RING_VALUES = ["Retail", "RP", "WIS", "WIF"]
 STORE_LANGUAGE_VALUES = ["en-US", "en-GB", "de-DE", "fr-FR", "es-ES", "it-IT", "ja-JP", "ko-KR", "pt-BR", "zh-CN", "zh-TW"]
 STORE_MARKET_VALUES = ["US", "GB", "CA", "AU", "DE", "FR", "ES", "IT", "JP", "KR", "BR", "CN", "TW"]
+KEEP_UPDATED_INTERVAL_MS = 6 * 60 * 60 * 1000
+KEEP_UPDATED_START_DELAY_MS = 5000
 APPINSTALLER_NS = "http://schemas.microsoft.com/appx/appinstaller/2021"
 WINDOWS_DIR = os.environ.get("WINDIR", r"C:\Windows")
 WINDOWS_POWERSHELL = os.path.join(WINDOWS_DIR, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
@@ -446,6 +450,8 @@ class StoreAPI:
             "StoreRing": "Retail",
             "StoreLanguage": "en-US",
             "StoreMarket": "US",
+            "KeepUpdatedEnabled": False,
+            "KeepUpdatedLastScan": "",
         }
 
     @staticmethod
@@ -503,6 +509,8 @@ class StoreAPI:
             profile["StoreRing"] = StoreAPI.normalize_store_ring(data.get("StoreRing", "Retail"))
             profile["StoreLanguage"] = StoreAPI.normalize_store_language(data.get("StoreLanguage", "en-US"))
             profile["StoreMarket"] = StoreAPI.normalize_store_market(data.get("StoreMarket", "US"))
+            profile["KeepUpdatedEnabled"] = bool(data.get("KeepUpdatedEnabled", False))
+            profile["KeepUpdatedLastScan"] = str(data.get("KeepUpdatedLastScan", "") or "")
             return profile
         except Exception:
             return StoreAPI.default_user_profile()
@@ -942,6 +950,8 @@ class StoreAPI:
             "FileName", "PackageIdentity", "PackageRoleLabel", "Architecture", "FileType",
             "IsBundle", "IsEncrypted", "SizeBytes", "SizeStr", "Sha256", "AvailableVersion",
             "LocalPath", "CacheManifest", "StoreQuery", "DownloadStatus", "LastError",
+            "UpdateSourceApp", "UpdateInstalledIdentity", "UpdateInstalledVersion",
+            "UpdateAvailableVersion",
         ]
         items = []
         for package in queue or []:
@@ -959,6 +969,8 @@ class StoreAPI:
             "SizeBytes", "SizeStr", "Sha256", "AvailableVersion", "PackageRole",
             "PackageRoleLabel", "InstallOrder", "PackageIdentity", "LocalPath",
             "CacheManifest", "StoreQuery", "DownloadStatus", "LastError",
+            "UpdateSourceApp", "UpdateInstalledIdentity", "UpdateInstalledVersion",
+            "UpdateAvailableVersion",
         ]
         items = []
         for package in queue or []:
@@ -1894,6 +1906,56 @@ if ($sig.SignerCertificate) {{
             return set()
 
     @staticmethod
+    def normalize_installed_appx_versions(records):
+        if isinstance(records, dict):
+            records = [records]
+
+        versions = {}
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+            name = record.get("Name") or record.get("DisplayName") or record.get("PackageIdentity")
+            version = record.get("Version") or record.get("PackageVersion")
+            key = str(name or "").strip().lower()
+            version_text = str(version or "").strip()
+            if not key or not version_text:
+                continue
+
+            current = versions.get(key)
+            if not current or compare_version_tuples(
+                version_tuple_from_text(version_text),
+                version_tuple_from_text(current),
+            ) > 0:
+                versions[key] = version_text
+        return versions
+
+    @staticmethod
+    def get_installed_appx_versions():
+        cmd = (
+            "$installed = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | "
+            "Select-Object @{Name='Name';Expression={$_.Name}}, @{Name='Version';Expression={[string]$_.Version}}); "
+            "$provisioned = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | "
+            "Select-Object @{Name='Name';Expression={$_.DisplayName}}, @{Name='Version';Expression={[string]$_.Version}}); "
+            "@($installed + $provisioned | Where-Object { $_.Name }) | ConvertTo-Json -Compress"
+        )
+        try:
+            result = subprocess.run(
+                [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return {}
+
+            payload = json.loads(result.stdout)
+            if isinstance(payload, dict):
+                payload = [payload]
+            return StoreAPI.normalize_installed_appx_versions(payload)
+        except Exception:
+            return {}
+
+    @staticmethod
     def detect_missing_ltsc_components(installed_identities=None):
         installed = installed_identities if installed_identities is not None else StoreAPI.get_installed_appx_identities()
         installed = {str(identity).lower() for identity in installed}
@@ -1913,6 +1975,62 @@ if ($sig.SignerCertificate) {{
             missing.append(missing_app)
 
         return missing
+
+    @staticmethod
+    def select_catalog_update_packages(catalog, installed_versions, package_lookup, target_arch, prefer_exact_arch=False):
+        installed = {
+            str(identity).strip().lower(): str(version).strip()
+            for identity, version in (installed_versions or {}).items()
+            if str(identity).strip() and str(version).strip()
+        }
+        updates = []
+        seen_filenames = set()
+
+        for category in (catalog or {}).values():
+            for app in category.get("apps", []):
+                packages = package_lookup(app) or []
+                recommended = StoreAPI.smart_select(packages, target_arch, prefer_exact_arch)
+                update_anchor = None
+
+                for package in recommended:
+                    if is_dependency_package(package) or not package.get("FileName"):
+                        continue
+                    identity = (package.get("PackageIdentity") or package_identity(package["FileName"])).lower()
+                    installed_version = installed.get(identity)
+                    if installed_version and not installed_version_satisfies_package(package, installed_version):
+                        update_anchor = (identity, installed_version, package)
+                        break
+
+                if not update_anchor:
+                    continue
+
+                update_identity, installed_version, app_package = update_anchor
+                available_version = (
+                    app_package.get("AvailableVersion")
+                    or format_version_tuple(package_version_tuple(app_package["FileName"]))
+                )
+
+                for package in recommended:
+                    if not package.get("FileName"):
+                        continue
+                    identity = (package.get("PackageIdentity") or package_identity(package["FileName"])).lower()
+                    package_installed_version = installed.get(identity)
+                    if package_installed_version and installed_version_satisfies_package(package, package_installed_version):
+                        continue
+
+                    filename_key = package["FileName"].lower()
+                    if filename_key in seen_filenames:
+                        continue
+
+                    update_package = annotate_package(package.copy())
+                    update_package["UpdateSourceApp"] = app.get("Name", "")
+                    update_package["UpdateInstalledIdentity"] = update_identity
+                    update_package["UpdateInstalledVersion"] = installed_version
+                    update_package["UpdateAvailableVersion"] = available_version
+                    updates.append(update_package)
+                    seen_filenames.add(filename_key)
+
+        return order_packages_for_install(updates, target_arch)
 
     @staticmethod
     def should_skip_installed_package(package):
@@ -2340,6 +2458,7 @@ class MSStoreHelperApp(ctk.CTk):
         self.store_ring_var = ctk.StringVar(value=StoreAPI.normalize_store_ring(self.user_profile.get("StoreRing", "Retail")))
         self.store_language_var = ctk.StringVar(value=StoreAPI.normalize_store_language(self.user_profile.get("StoreLanguage", "en-US")))
         self.store_market_var = ctk.StringVar(value=StoreAPI.normalize_store_market(self.user_profile.get("StoreMarket", "US")))
+        self.keep_updated_var = ctk.BooleanVar(value=bool(self.user_profile.get("KeepUpdatedEnabled", False)))
         Theme.set_mode(self.theme_mode_var.get())
         ctk.set_appearance_mode(Theme.MODE)
         ctk.set_default_color_theme("dark-blue")
@@ -2359,6 +2478,8 @@ class MSStoreHelperApp(ctk.CTk):
         self.download_queue = download_state.get("Queue", [])
         self.shared_cache_enabled = ctk.BooleanVar(value=False)
         self.shared_cache_path = os.path.join(DEFAULT_OUTPUT, "SharedCache")
+        self.keep_updated_after_id = None
+        self.keep_updated_running = False
         
         self._build_ui()
         if self.download_queue:
@@ -2368,6 +2489,8 @@ class MSStoreHelperApp(ctk.CTk):
             self._log("INFO", f"Restored {len(self.download_queue)} queued download(s) from previous session")
         if os.environ.get("MSSTOREHELPER_SKIP_SOURCE_HEALTH") != "1":
             threading.Thread(target=self._source_health_worker, daemon=True).start()
+        if self.keep_updated_var.get():
+            self._schedule_keep_updated_scan(KEEP_UPDATED_START_DELAY_MS)
 
     def _target_arch(self):
         choice = self.arch_override_var.get()
@@ -2492,7 +2615,31 @@ class MSStoreHelperApp(ctk.CTk):
         
         ctk.CTkButton(fix_section, text="⚡ Apply Quick Fix", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._apply_quickfix).pack(fill="x", pady=(0, 6))
         ctk.CTkButton(fix_section, text="🔎 Scan LTSC Gaps", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._scan_ltsc_gaps).pack(fill="x", pady=(0, 6))
-        ctk.CTkButton(fix_section, text="🎮 Queue Xbox Core", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._queue_xbox_core).pack(fill="x")
+        ctk.CTkButton(fix_section, text="🎮 Queue Xbox Core", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._queue_xbox_core).pack(fill="x", pady=(0, 6))
+
+        updates_row = ctk.CTkFrame(fix_section, fg_color="transparent")
+        updates_row.pack(fill="x")
+        ctk.CTkCheckBox(
+            updates_row,
+            text="Keep updated",
+            variable=self.keep_updated_var,
+            font=("Segoe UI", 12),
+            fg_color=Theme.PRIMARY,
+            hover_color=Theme.PRIMARY_HOVER,
+            command=self._change_keep_updated_mode,
+        ).pack(side="left")
+        ctk.CTkButton(
+            updates_row,
+            text="Check",
+            width=64,
+            height=30,
+            font=("Segoe UI", 12),
+            fg_color="transparent",
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=self._run_keep_updated_scan,
+        ).pack(side="right")
 
         ctk.CTkFrame(self.sidebar, fg_color=Theme.BORDER, height=1).pack(fill="x", padx=15, pady=10)
 
@@ -3325,6 +3472,119 @@ Fixes "needs to be online" and similar errors.
         )
         self._log_source_diagnostic(diagnostic, app_data.get("Name"))
         return diagnostic["Packages"]
+
+    def _change_keep_updated_mode(self):
+        enabled = bool(self.keep_updated_var.get())
+        self.user_profile["KeepUpdatedEnabled"] = enabled
+        self._save_user_profile()
+
+        if enabled:
+            self._update_status("Keep updated enabled", Theme.INFO)
+            self._log("INFO", "Keep updated enabled; scans run while MSStoreHelper is open")
+            self._run_keep_updated_scan()
+        else:
+            if self.keep_updated_after_id:
+                try:
+                    self.after_cancel(self.keep_updated_after_id)
+                except Exception:
+                    pass
+                self.keep_updated_after_id = None
+            self._update_status("Keep updated disabled", Theme.TEXT_SECONDARY)
+            self._log("INFO", "Keep updated disabled")
+
+    def _schedule_keep_updated_scan(self, delay_ms=KEEP_UPDATED_INTERVAL_MS):
+        if not self.keep_updated_var.get():
+            return
+        if self.keep_updated_after_id:
+            try:
+                self.after_cancel(self.keep_updated_after_id)
+            except Exception:
+                pass
+        self.keep_updated_after_id = self.after(
+            delay_ms,
+            lambda: self._run_keep_updated_scan(scheduled=True),
+        )
+
+    def _run_keep_updated_scan(self, scheduled=False):
+        if self.keep_updated_running:
+            self._log("INFO", "Keep updated scan already running")
+            return
+
+        target_arch = self._target_arch()
+        prefer_exact = self._has_arch_override()
+        self.keep_updated_running = True
+        self._update_status("Checking installed Store apps...", Theme.INFO)
+        threading.Thread(
+            target=self._keep_updated_worker,
+            args=(scheduled, target_arch, prefer_exact),
+            daemon=True,
+        ).start()
+
+    def _finish_keep_updated_scan(self):
+        self.keep_updated_running = False
+        if self.keep_updated_var.get():
+            self._schedule_keep_updated_scan()
+
+    def _keep_updated_worker(self, scheduled=False, target_arch=SYSTEM_ARCH, prefer_exact=False):
+        try:
+            installed_versions = StoreAPI.get_installed_appx_versions()
+            if not installed_versions:
+                self.after(0, lambda: self._update_status("No installed Store apps found", Theme.WARNING))
+                self.after(0, lambda: self._log("WARNING", "Keep updated scan found no installed AppX/MSIX packages"))
+                return
+
+            self.after(0, lambda c=len(installed_versions): self._log("INFO", f"Checking {c} installed AppX/MSIX identities against the catalog"))
+            update_packages = StoreAPI.select_catalog_update_packages(
+                APP_CATALOG,
+                installed_versions,
+                self._get_packages_with_logging,
+                target_arch,
+                prefer_exact,
+            )
+            self.user_profile["KeepUpdatedLastScan"] = datetime.now(timezone.utc).isoformat()
+            self._save_user_profile()
+
+            if not update_packages:
+                self.after(0, lambda: self._update_status("Installed catalog apps are current", Theme.SUCCESS))
+                self.after(0, lambda: self._log("SUCCESS", "Keep updated scan found no newer catalog packages"))
+                return
+
+            queued_count = self._queue_unique_packages(update_packages, target_arch)
+            if queued_count:
+                app_names = sorted({package.get("UpdateSourceApp", "app") for package in update_packages if package.get("UpdateSourceApp")})
+                label = ", ".join(app_names[:4]) + ("..." if len(app_names) > 4 else "")
+                self.after(0, self._update_queue_ui)
+                self.after(0, lambda c=queued_count: self._update_status(f"Queued {c} update package(s)", Theme.SUCCESS))
+                self.after(0, lambda c=queued_count, names=label: self._log("SUCCESS", f"Keep updated queued {c} package(s): {names}"))
+            else:
+                self.after(0, lambda: self._update_status("Updates already queued", Theme.INFO))
+                self.after(0, lambda: self._log("INFO", "Keep updated found packages already present in the queue"))
+        except Exception as exc:
+            self.after(0, lambda: self._update_status("Keep updated scan failed", Theme.DANGER))
+            self.after(0, lambda e=str(exc): self._log("ERROR", f"Keep updated scan failed: {e}"))
+        finally:
+            self.after(0, self._finish_keep_updated_scan)
+
+    def _queue_unique_packages(self, packages, target_arch):
+        queued_names = {
+            package.get("FileName", "").lower()
+            for package in self.download_queue
+            if package.get("FileName")
+        }
+        queued_count = 0
+        for package in packages:
+            filename = package.get("FileName", "")
+            key = filename.lower()
+            if not filename or key in queued_names:
+                continue
+            self.download_queue.append(annotate_package(package.copy()))
+            queued_names.add(key)
+            queued_count += 1
+
+        if queued_count:
+            self.download_queue = StoreAPI.order_packages_for_install(self.download_queue, target_arch)
+            self._save_download_state()
+        return queued_count
     
     def _do_search(self):
         query = self.search_entry.get().strip()
@@ -3415,7 +3675,7 @@ Fixes "needs to be online" and similar errors.
         missing_names = ", ".join(app["Name"] for app in missing_apps)
         self.after(0, lambda names=missing_names: self._log("INFO", f"Missing LTSC components: {names}"))
 
-        queued_count = 0
+        selected_packages = []
         for app in missing_apps:
             self.after(0, lambda n=app["Name"]: self._update_status(f"📥 Queueing {n}...", Theme.INFO))
             packages = self._get_packages_with_logging(app)
@@ -3424,17 +3684,12 @@ Fixes "needs to be online" and similar errors.
                 continue
 
             recommended = StoreAPI.smart_select(packages, target_arch, prefer_exact)
-            for package in recommended:
-                if any(queued["FileName"] == package["FileName"] for queued in self.download_queue):
-                    continue
-            self.download_queue.append(annotate_package(package.copy()))
-            queued_count += 1
+            selected_packages.extend(recommended)
 
-        self.download_queue = StoreAPI.order_packages_for_install(self.download_queue, target_arch)
+        queued_count = self._queue_unique_packages(selected_packages, target_arch)
         dependency_count = sum(1 for pkg in self.download_queue if is_dependency_package(pkg))
 
         if queued_count:
-            self._save_download_state()
             self.after(0, self._update_queue_ui)
             self.after(0, lambda c=queued_count: self._update_status(f"✅ Queued {c} LTSC package(s)", Theme.SUCCESS))
             self.after(0, lambda c=queued_count, d=dependency_count: self._log("SUCCESS", f"Queued {c} package(s) for missing LTSC components; dependencies in queue: {d}"))
@@ -3462,13 +3717,15 @@ Fixes "needs to be online" and similar errors.
             all_packages.extend(packages)
 
         selected = StoreAPI.select_pinned_xbox_packages(all_packages, target_arch, prefer_exact)
-        queued_count = 0
+        existing_names = {
+            package.get("FileName", "").lower()
+            for package in self.download_queue
+            if package.get("FileName")
+        }
+        queued_count = self._queue_unique_packages(selected, target_arch)
         for package in selected:
-            if any(queued["FileName"] == package["FileName"] for queued in self.download_queue):
+            if package.get("FileName", "").lower() in existing_names:
                 continue
-            self.download_queue.append(annotate_package(package.copy()))
-            queued_count += 1
-
             if package.get("XboxCoreName"):
                 if package.get("PinnedVersionMatched"):
                     self.after(0, lambda p=package: self._log("SUCCESS", f"Using pinned {p['XboxCoreName']} version: {p.get('AvailableVersion', 'unknown')}"))
@@ -3476,9 +3733,7 @@ Fixes "needs to be online" and similar errors.
                     pins = ", ".join(package.get("PinnedVersions", [])) or "configured pin"
                     self.after(0, lambda p=package, pins=pins: self._log("WARNING", f"Pinned {p['XboxCoreName']} version ({pins}) not available; queued {p.get('AvailableVersion', 'unknown')}"))
 
-        self.download_queue = StoreAPI.order_packages_for_install(self.download_queue, target_arch)
         if queued_count:
-            self._save_download_state()
             self.after(0, self._update_queue_ui)
             self.after(0, lambda c=queued_count: self._update_status(f"✅ Queued {c} Xbox core package(s)", Theme.SUCCESS))
             self.after(0, lambda c=queued_count: self._log("SUCCESS", f"Queued {c} Xbox core package(s) with dependency-first ordering"))

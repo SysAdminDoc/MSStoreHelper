@@ -11,7 +11,6 @@ GUI tool to download/install Microsoft Store apps without the Store UI. Planned 
 - **UUPDump** — sister-tool UX pattern: script-emit workflow for offline scenarios, worth mirroring for fleet installs.
 
 ## Nice-to-Haves
-- Scheduled "keep updated" mode: re-query all installed Store apps and pull newer bundles
 - Rollback to previous `.appx` version (keep last 2 bundles in cache)
 - Package diff: show what permissions/dependencies changed between two versions
 - CLI twin for headless use via RMM (`MSStoreHelper.py --install Microsoft.WindowsTerminal`)

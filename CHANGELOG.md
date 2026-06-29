@@ -2,6 +2,12 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.31.0] - 2026-06-29
+
+- Added an in-app Keep Updated mode that periodically checks installed catalog apps and queues newer Store packages.
+- Added installed AppX/MSIX version inventory and catalog update selection with dependency-aware queueing.
+- Added tests for update candidate selection, installed-version normalization, and persisted keep-updated settings.
+
 ## [v3.30.0] - 2026-06-29
 
 - Added Ubuntu and Debian WSL distribution catalog entries backed by Microsoft Store product IDs.
