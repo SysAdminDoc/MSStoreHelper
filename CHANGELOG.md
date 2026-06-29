@@ -2,6 +2,12 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.35.0] - 2026-06-29
+
+- Added a telemetry-free local HTTP mirror for downloaded AppX/MSIX caches with a generated JSON package index.
+- Added CLI mirror controls for `--mirror`, `--host`, `--port`, and `--mirror-index-only` without opening the GUI.
+- Added tests for mirror index metadata, background HTTP serving, and index-only CLI execution.
+
 ## [v3.34.0] - 2026-06-29
 
 - Added a headless CLI for Store search, package download, and elevated install workflows without opening the GUI.

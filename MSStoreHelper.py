@@ -21,6 +21,8 @@ import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import quote
 try:
     import winreg
 except ImportError:
@@ -93,12 +95,13 @@ from bs4 import BeautifulSoup
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.34.0"
+APP_VERSION = "3.35.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 CACHE_MANIFEST_NAME = "msstorehelper-cache-manifest.json"
+MIRROR_INDEX_NAME = "msstorehelper-mirror-index.json"
 CACHE_HISTORY_LIMIT = 2
 WINGET_IMPORT_SCHEMA = "https://aka.ms/winget-packages.schema.2.0.json"
 WINGET_MSSTORE_SOURCE = {
@@ -1317,6 +1320,117 @@ class StoreAPI:
         shutil.copy2(local_path, destination)
         StoreAPI.write_artifact_manifest(package, destination, cache_path)
         return True, f"Cached: {destination}"
+
+    @staticmethod
+    def mirror_package_records(cache_folder, host="127.0.0.1", port=8765):
+        folder = os.path.abspath(cache_folder)
+        if not os.path.isdir(folder):
+            return []
+
+        manifest = StoreAPI.load_cache_manifest(folder)
+        artifacts = manifest.get("Artifacts", {})
+        records = []
+        seen = set()
+        base_url = f"http://{host}:{int(port)}"
+
+        for filename in sorted(os.listdir(folder), key=str.lower):
+            path = os.path.join(folder, filename)
+            if not os.path.isfile(path) or not StoreAPI.is_cacheable_artifact(filename):
+                continue
+            metadata = artifacts.get(filename, {}).copy()
+            if metadata and not StoreAPI.cached_artifact_is_valid(path, metadata):
+                continue
+            if not metadata:
+                metadata = StoreAPI.artifact_metadata({"FileName": filename}, path)
+
+            key = filename.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append({
+                "FileName": filename,
+                "Url": f"{base_url}/{quote(filename)}",
+                "SizeBytes": os.path.getsize(path),
+                "SizeStr": metadata.get("SizeStr") or format_size(os.path.getsize(path)),
+                "Sha256": metadata.get("Sha256") or StoreAPI.file_sha256(path),
+                "PackageIdentity": metadata.get("PackageIdentity") or package_identity(filename),
+                "AvailableVersion": metadata.get("AvailableVersion") or format_version_tuple(package_version_tuple(filename)),
+                "Architecture": metadata.get("Architecture", "neutral"),
+                "FileType": metadata.get("FileType", os.path.splitext(filename)[1].lower().lstrip(".").upper()),
+                "CachedAt": metadata.get("CachedAt") or metadata.get("DownloadedAt") or "",
+            })
+
+        return records
+
+    @staticmethod
+    def build_mirror_index(cache_folder, host="127.0.0.1", port=8765):
+        folder = os.path.abspath(cache_folder)
+        records = StoreAPI.mirror_package_records(folder, host, port)
+        return {
+            "AppName": APP_NAME,
+            "AppVersion": APP_VERSION,
+            "GeneratedAt": datetime.now(timezone.utc).isoformat(),
+            "CacheFolder": folder,
+            "BaseUrl": f"http://{host}:{int(port)}",
+            "IndexFile": MIRROR_INDEX_NAME,
+            "PackageCount": len(records),
+            "Packages": records,
+        }
+
+    @staticmethod
+    def write_mirror_index(cache_folder, host="127.0.0.1", port=8765, index_name=MIRROR_INDEX_NAME):
+        os.makedirs(cache_folder, exist_ok=True)
+        index = StoreAPI.build_mirror_index(cache_folder, host, port)
+        path = os.path.join(cache_folder, index_name)
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(index, handle, indent=2)
+            handle.write("\n")
+        index["IndexPath"] = os.path.abspath(path)
+        return index
+
+    @staticmethod
+    def mirror_http_handler(cache_folder, host="127.0.0.1", port=8765):
+        folder = os.path.abspath(cache_folder)
+
+        class MirrorHandler(SimpleHTTPRequestHandler):
+            server_version = f"{APP_NAME}Mirror/{APP_VERSION}"
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, directory=folder, **kwargs)
+
+            def do_GET(self):
+                if self.path in {"/", f"/{MIRROR_INDEX_NAME}"}:
+                    actual_port = int(self.server.server_address[1])
+                    StoreAPI.write_mirror_index(folder, host, actual_port)
+                    self.path = f"/{MIRROR_INDEX_NAME}"
+                return super().do_GET()
+
+            def do_HEAD(self):
+                if self.path in {"/", f"/{MIRROR_INDEX_NAME}"}:
+                    actual_port = int(self.server.server_address[1])
+                    StoreAPI.write_mirror_index(folder, host, actual_port)
+                    self.path = f"/{MIRROR_INDEX_NAME}"
+                return super().do_HEAD()
+
+            def end_headers(self):
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-MSStoreHelper-Mirror", APP_VERSION)
+                super().end_headers()
+
+            def log_message(self, _format, *_args):
+                return
+
+        return MirrorHandler
+
+    @staticmethod
+    def create_mirror_server(cache_folder, host="127.0.0.1", port=8765):
+        folder = os.path.abspath(cache_folder)
+        os.makedirs(folder, exist_ok=True)
+        handler = StoreAPI.mirror_http_handler(folder, host, port)
+        server = ThreadingHTTPServer((host, int(port)), handler)
+        actual_port = int(server.server_address[1])
+        index = StoreAPI.write_mirror_index(folder, host, actual_port)
+        return server, index
 
     @staticmethod
     def cache_history_entries(cache_folders, package_identities=None):
@@ -4921,11 +5035,15 @@ def build_cli_parser():
     action.add_argument("--search", metavar="QUERY", help="Search Microsoft Store without opening the GUI.")
     action.add_argument("--download", metavar="APP_OR_PRODUCT_ID", help="Resolve, select, and download Store packages.")
     action.add_argument("--install", metavar="APP_OR_PRODUCT_ID", help="Download and install selected Store packages.")
+    action.add_argument("--mirror", metavar="CACHE_FOLDER", help="Serve cached packages over local HTTP without contacting Store services.")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help=f"Download folder. Default: {DEFAULT_OUTPUT}")
     parser.add_argument("--arch", choices=["auto", "x64", "x86", "arm64", "arm", "neutral"], default="auto")
     parser.add_argument("--ring", choices=STORE_RING_VALUES, default="Retail")
     parser.add_argument("--language", default="en-US")
     parser.add_argument("--market", default="US")
+    parser.add_argument("--host", default="127.0.0.1", help="Mirror bind host. Use 0.0.0.0 for LAN clients.")
+    parser.add_argument("--port", type=int, default=8765, help="Mirror bind port.")
+    parser.add_argument("--mirror-index-only", action="store_true", help="Write the mirror index and exit instead of serving forever.")
     parser.add_argument("--json", action="store_true", help="Emit a machine-readable JSON summary.")
     return parser
 
@@ -4950,7 +5068,11 @@ def _cli_emit_summary(summary, as_json, stdout):
         name = item.get("FileName", "")
         status = item.get("Status", "")
         message = item.get("Message", "")
-        _cli_print(f"- {status}: {name} {message}".rstrip(), stdout)
+        if status:
+            _cli_print(f"- {status}: {name} {message}".rstrip(), stdout)
+        else:
+            detail = item.get("Url", message)
+            _cli_print(f"- {name} {detail}".rstrip(), stdout)
 
 
 def _cli_package_record(package, status, message="", path=None):
@@ -5118,6 +5240,43 @@ def _cli_package_workflow(args, stdout, stderr):
     return 0
 
 
+def _cli_mirror(args, stdout, stderr):
+    folder = os.path.abspath(args.mirror)
+    if args.mirror_index_only:
+        index = StoreAPI.write_mirror_index(folder, args.host, args.port)
+        summary = {
+            "Action": "mirror-index",
+            "Host": args.host,
+            "Port": int(args.port),
+            **index,
+        }
+        _cli_emit_summary(summary, args.json, stdout)
+        return 0 if index.get("PackageCount", 0) > 0 else 1
+
+    server, index = StoreAPI.create_mirror_server(folder, args.host, args.port)
+    actual_port = int(server.server_address[1])
+    summary = {
+        "Action": "mirror",
+        "Host": args.host,
+        "Port": actual_port,
+        **index,
+    }
+    if index.get("PackageCount", 0) == 0:
+        _cli_print(f"error: no cacheable AppX/MSIX packages found in {folder}", stderr)
+        server.server_close()
+        _cli_emit_summary(summary, args.json, stdout)
+        return 1
+
+    _cli_emit_summary(summary, args.json, stdout)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        _cli_print("mirror stopped", stderr)
+    finally:
+        server.server_close()
+    return 0
+
+
 def run_cli(argv=None, stdout=None, stderr=None):
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -5125,6 +5284,8 @@ def run_cli(argv=None, stdout=None, stderr=None):
     args = parser.parse_args(argv)
     if args.search:
         return _cli_search(args.search, args, stdout, stderr)
+    if args.mirror:
+        return _cli_mirror(args, stdout, stderr)
     return _cli_package_workflow(args, stdout, stderr)
 
 

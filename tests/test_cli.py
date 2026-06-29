@@ -4,7 +4,9 @@ import io
 import json
 import os
 import tempfile
+import threading
 import unittest
+import urllib.request
 from unittest.mock import patch
 
 from MSStoreHelper import StoreAPI, main, run_cli
@@ -127,6 +129,77 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         cli_mock.assert_called_once_with(["--search", "terminal"])
         app_mock.assert_not_called()
+
+    def test_mirror_index_includes_cache_urls_and_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            filename = "Microsoft.WindowsTerminal_1.0.0.0_x64__8wekyb3d8bbwe.msixbundle"
+            path = os.path.join(temp_dir, filename)
+            with open(path, "wb") as handle:
+                handle.write(b"package")
+            StoreAPI.write_artifact_manifest({"FileName": filename, "Url": "https://example.test/app"}, path, temp_dir)
+
+            index = StoreAPI.build_mirror_index(temp_dir, "127.0.0.1", 8765)
+
+        self.assertEqual(index["PackageCount"], 1)
+        package = index["Packages"][0]
+        self.assertEqual(package["FileName"], filename)
+        self.assertEqual(package["PackageIdentity"], "Microsoft.WindowsTerminal")
+        self.assertEqual(package["Url"], f"http://127.0.0.1:8765/{filename}")
+        self.assertTrue(package["Sha256"])
+
+    def test_mirror_server_serves_index_and_package_without_gui(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            filename = "Microsoft.WindowsTerminal_1.0.0.0_x64__8wekyb3d8bbwe.msixbundle"
+            path = os.path.join(temp_dir, filename)
+            with open(path, "wb") as handle:
+                handle.write(b"package")
+            StoreAPI.write_artifact_manifest({"FileName": filename}, path, temp_dir)
+
+            server, index = StoreAPI.create_mirror_server(temp_dir, "127.0.0.1", 0)
+            port = server.server_address[1]
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/msstorehelper-mirror-index.json", timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/{filename}", timeout=5) as response:
+                    package_bytes = response.read()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+        self.assertEqual(index["PackageCount"], 1)
+        self.assertEqual(payload["PackageCount"], 1)
+        self.assertEqual(payload["Packages"][0]["Url"], f"http://127.0.0.1:{port}/{filename}")
+        self.assertEqual(package_bytes, b"package")
+
+    def test_run_cli_mirror_index_only_writes_index_without_gui(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            filename = "Microsoft.WindowsTerminal_1.0.0.0_x64__8wekyb3d8bbwe.msixbundle"
+            path = os.path.join(temp_dir, filename)
+            with open(path, "wb") as handle:
+                handle.write(b"package")
+            StoreAPI.write_artifact_manifest({"FileName": filename}, path, temp_dir)
+
+            with patch("MSStoreHelper.MSStoreHelperApp") as app_mock:
+                exit_code = run_cli(
+                    ["--mirror", temp_dir, "--mirror-index-only", "--port", "8765", "--json"],
+                    stdout,
+                    stderr,
+                )
+            index_path = os.path.join(temp_dir, "msstorehelper-mirror-index.json")
+            index_exists = os.path.exists(index_path)
+
+        self.assertEqual(exit_code, 0)
+        app_mock.assert_not_called()
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertTrue(index_exists)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["Action"], "mirror-index")
+        self.assertEqual(payload["PackageCount"], 1)
 
 
 if __name__ == "__main__":
