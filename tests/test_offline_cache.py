@@ -117,6 +117,74 @@ class OfflineCacheTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertEqual(message, "File type is not cacheable")
 
+    def test_cache_history_keeps_last_two_versions_and_removes_older_artifact(self):
+        with tempfile.TemporaryDirectory() as cache_dir:
+            paths = []
+            for version in ("1.0.0.0", "2.0.0.0", "3.0.0.0"):
+                path = os.path.join(cache_dir, f"Contoso.App_{version}_x64__test.msixbundle")
+                with open(path, "wb") as handle:
+                    handle.write(version.encode("ascii"))
+                StoreAPI.write_artifact_manifest({"FileName": os.path.basename(path)}, path, cache_dir)
+                paths.append(path)
+
+            manifest = StoreAPI.load_cache_manifest(cache_dir)
+            history = manifest["History"]["contoso.app"]
+
+            self.assertEqual([item["AvailableVersion"] for item in history], ["3.0.0.0", "2.0.0.0"])
+            self.assertNotIn(os.path.basename(paths[0]), manifest["Artifacts"])
+            self.assertFalse(os.path.exists(paths[0]))
+            self.assertTrue(os.path.exists(paths[1]))
+            self.assertTrue(os.path.exists(paths[2]))
+
+    def test_rollback_candidates_selects_newest_cached_version_below_current(self):
+        with tempfile.TemporaryDirectory() as cache_dir:
+            for version in ("1.0.0.0", "2.0.0.0", "3.0.0.0"):
+                path = os.path.join(cache_dir, f"Contoso.App_{version}_x64__test.msixbundle")
+                with open(path, "wb") as handle:
+                    handle.write(version.encode("ascii"))
+                StoreAPI.write_artifact_manifest({"FileName": os.path.basename(path)}, path, cache_dir)
+
+            candidates = StoreAPI.rollback_candidates(
+                [cache_dir],
+                ["Contoso.App"],
+                {"contoso.app": "3.0.0.0"},
+            )
+
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0]["RollbackIdentity"], "contoso.app")
+            self.assertEqual(candidates[0]["RollbackVersion"], "2.0.0.0")
+
+    def test_rollback_candidates_use_second_newest_without_current_version(self):
+        with tempfile.TemporaryDirectory() as cache_dir:
+            for version in ("1.0.0.0", "2.0.0.0"):
+                path = os.path.join(cache_dir, f"Contoso.App_{version}_x64__test.msixbundle")
+                with open(path, "wb") as handle:
+                    handle.write(version.encode("ascii"))
+                StoreAPI.write_artifact_manifest({"FileName": os.path.basename(path)}, path, cache_dir)
+
+            candidates = StoreAPI.rollback_candidates([cache_dir], ["Contoso.App"], {})
+
+            self.assertEqual(candidates[0]["RollbackVersion"], "1.0.0.0")
+
+    def test_rollback_package_runs_remove_then_add(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package_path = os.path.join(temp_dir, "Contoso.App_1.0.0.0_x64__test.msixbundle")
+            with open(package_path, "wb") as handle:
+                handle.write(b"package")
+
+            with patch("MSStoreHelper.subprocess.run") as run_mock:
+                run_mock.return_value.returncode = 0
+                run_mock.return_value.stdout = "rollback ok"
+                run_mock.return_value.stderr = ""
+
+                ok, message = StoreAPI.rollback_package("Contoso.App", package_path)
+
+            self.assertTrue(ok, message)
+            command = run_mock.call_args[0][0][-1]
+            self.assertIn("Remove-AppxPackage", command)
+            self.assertIn("Add-AppxPackage", command)
+            self.assertIn("Contoso.App", command)
+
     def test_download_file_writes_final_file_atomically_and_records_manifest(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = os.path.join(temp_dir, "Contoso.App_1.0.0.0_x64__test.msix")

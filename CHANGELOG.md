@@ -2,6 +2,12 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.32.0] - 2026-06-29
+
+- Added bounded rollback cache history that keeps the last two AppX/MSIX versions per package identity.
+- Added a Rollback Previous queue action that finds the newest cached version below the current app version, verifies its signature, removes the current user package, and reinstalls the cached version.
+- Added tests for cache-history pruning, rollback candidate selection, and rollback PowerShell command generation.
+
 ## [v3.31.0] - 2026-06-29
 
 - Added an in-app Keep Updated mode that periodically checks installed catalog apps and queues newer Store packages.

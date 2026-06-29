@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.31.0-blue)
+![Version](https://img.shields.io/badge/version-3.32.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -30,6 +30,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 🔐 **Verified Downloads** - Writes packages atomically and records SHA-256 metadata before cache reuse
 - **Resumable Downloads** - Persists the queue across restarts and resumes `.part` downloads with HTTP Range requests
 - **Keep Updated Mode** - Re-checks installed catalog apps and queues newer Store bundles while the app is open
+- **Rollback Cache** - Keeps the last two cached package versions and can reinstall the previous cached app version
 - **Source Health** - Detects StoreEdgeFD, RG-Adguard, WinGet, and Store CLI availability with fallback hints
 - **Store Query Controls** - Persists RG-Adguard ring, Store language, and market for localized package lookup and deployment artifacts
 - **Pinned Python Setup** - Uses `requirements.txt` and package metadata instead of runtime dependency installs
@@ -147,9 +148,10 @@ python MSStoreHelper.py
 
 ### 📦 Installing Packages
 
-1. After downloading, click **"📦 Install Downloaded"**
+1. After downloading, click **"Install"**
 2. **Note**: Requires Administrator privileges
 3. Check the console output for any errors or hints
+4. To roll back, queue the app identity and click **"Rollback"** to install the newest cached version below the current version
 
 ### 🔧 Repairing the Store
 
@@ -242,7 +244,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.31.0"
+APP_VERSION = "3.32.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 

@@ -92,12 +92,13 @@ from bs4 import BeautifulSoup
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.31.0"
+APP_VERSION = "3.32.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 CACHE_MANIFEST_NAME = "msstorehelper-cache-manifest.json"
+CACHE_HISTORY_LIMIT = 2
 WINGET_IMPORT_SCHEMA = "https://aka.ms/winget-packages.schema.2.0.json"
 WINGET_MSSTORE_SOURCE = {
     "Argument": "https://storeedgefd.dsx.mp.microsoft.com/v9.0",
@@ -895,26 +896,86 @@ class StoreAPI:
             with open(manifest_path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
             if isinstance(data, dict) and isinstance(data.get("Artifacts"), dict):
+                data.setdefault("History", {})
                 return data
         except Exception:
             pass
-        return {"Version": 1, "Artifacts": {}}
+        return {"Version": 2, "Artifacts": {}, "History": {}}
 
     @staticmethod
     def save_cache_manifest(folder, manifest):
         os.makedirs(folder, exist_ok=True)
-        manifest["Version"] = 1
+        manifest.setdefault("Artifacts", {})
+        manifest.setdefault("History", {})
+        manifest["Version"] = 2
         manifest["UpdatedAt"] = datetime.now(timezone.utc).isoformat()
         with open(StoreAPI._manifest_path(folder), "w", encoding="utf-8") as handle:
             json.dump(manifest, handle, indent=2, sort_keys=True)
 
     @staticmethod
+    def _metadata_version_key(metadata):
+        version = version_tuple_from_text(metadata.get("AvailableVersion"))
+        if not version and metadata.get("FileName"):
+            version = package_version_tuple(metadata["FileName"])
+        padded = tuple(version[:5]) + (0,) * max(0, 5 - len(version))
+        return padded[:5]
+
+    @staticmethod
+    def _path_is_inside_folder(path, folder):
+        try:
+            return os.path.commonpath([
+                os.path.abspath(path),
+                os.path.abspath(folder),
+            ]) == os.path.abspath(folder)
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _remove_cache_artifacts(folder, metadata_items):
+        for metadata in metadata_items:
+            path = metadata.get("Path") or os.path.join(folder, metadata.get("FileName", ""))
+            if not path or not StoreAPI._path_is_inside_folder(path, folder):
+                continue
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _record_cache_history(manifest, metadata, history_limit=CACHE_HISTORY_LIMIT):
+        identity = str(metadata.get("PackageIdentity") or package_identity(metadata.get("FileName", ""))).lower()
+        if not identity:
+            return []
+
+        history = manifest.setdefault("History", {})
+        entries = [
+            item for item in history.get(identity, [])
+            if item.get("FileName") != metadata.get("FileName")
+        ]
+        entries.append(metadata.copy())
+        entries.sort(
+            key=lambda item: (StoreAPI._metadata_version_key(item), item.get("CachedAt", "")),
+            reverse=True,
+        )
+        kept = entries[:history_limit]
+        pruned = entries[history_limit:]
+        history[identity] = kept
+
+        for item in pruned:
+            manifest["Artifacts"].pop(item.get("FileName", ""), None)
+        return pruned
+
+    @staticmethod
     def write_artifact_manifest(package, artifact_path, manifest_folder=None, source_url=None):
         folder = manifest_folder or os.path.dirname(os.path.abspath(artifact_path))
         metadata = StoreAPI.artifact_metadata(package, artifact_path, source_url)
+        metadata["CachedAt"] = datetime.now(timezone.utc).isoformat()
         manifest = StoreAPI.load_cache_manifest(folder)
         manifest["Artifacts"][metadata["FileName"]] = metadata
+        pruned = StoreAPI._record_cache_history(manifest, metadata)
         StoreAPI.save_cache_manifest(folder, manifest)
+        StoreAPI._remove_cache_artifacts(folder, pruned)
         package["LocalPath"] = artifact_path
         package["SizeBytes"] = metadata["SizeBytes"]
         package["Sha256"] = metadata["Sha256"]
@@ -1189,6 +1250,130 @@ class StoreAPI:
         shutil.copy2(local_path, destination)
         StoreAPI.write_artifact_manifest(package, destination, cache_path)
         return True, f"Cached: {destination}"
+
+    @staticmethod
+    def cache_history_entries(cache_folders, package_identities=None):
+        wanted = {
+            str(identity).strip().lower()
+            for identity in (package_identities or [])
+            if str(identity).strip()
+        }
+        entries = []
+        seen = set()
+
+        for folder in cache_folders or []:
+            if not folder or not os.path.isdir(folder):
+                continue
+            manifest = StoreAPI.load_cache_manifest(folder)
+            history = manifest.get("History") or {}
+            if not history:
+                for metadata in manifest.get("Artifacts", {}).values():
+                    identity = str(metadata.get("PackageIdentity") or package_identity(metadata.get("FileName", ""))).lower()
+                    if identity:
+                        history.setdefault(identity, []).append(metadata)
+
+            for identity, items in history.items():
+                identity = str(identity).strip().lower()
+                if wanted and identity not in wanted:
+                    continue
+                for item in items or []:
+                    if not isinstance(item, dict) or not item.get("FileName"):
+                        continue
+                    metadata = item.copy()
+                    metadata["PackageIdentity"] = str(metadata.get("PackageIdentity") or identity)
+                    metadata["Path"] = metadata.get("Path") or os.path.join(folder, metadata["FileName"])
+                    metadata["CacheFolder"] = folder
+                    key = (metadata["PackageIdentity"].lower(), metadata["FileName"].lower(), os.path.abspath(metadata["Path"]).lower())
+                    if key in seen or not StoreAPI.cached_artifact_is_valid(metadata["Path"], metadata):
+                        continue
+                    seen.add(key)
+                    entries.append(metadata)
+        return entries
+
+    @staticmethod
+    def rollback_candidates(cache_folders, package_identities=None, current_versions=None):
+        versions = {
+            str(identity).strip().lower(): str(version).strip()
+            for identity, version in (current_versions or {}).items()
+            if str(identity).strip() and str(version).strip()
+        }
+        grouped = {}
+        for entry in StoreAPI.cache_history_entries(cache_folders, package_identities):
+            identity = str(entry.get("PackageIdentity", "")).lower()
+            grouped.setdefault(identity, []).append(entry)
+
+        candidates = []
+        for identity, entries in grouped.items():
+            entries.sort(
+                key=lambda item: (StoreAPI._metadata_version_key(item), item.get("CachedAt", "")),
+                reverse=True,
+            )
+            current_version = versions.get(identity)
+            selected = None
+
+            if current_version:
+                current_tuple = version_tuple_from_text(current_version)
+                for entry in entries:
+                    if compare_version_tuples(StoreAPI._metadata_version_key(entry), current_tuple) < 0:
+                        selected = entry
+                        break
+            elif len(entries) > 1:
+                selected = entries[1]
+
+            if not selected:
+                continue
+
+            candidate = selected.copy()
+            candidate["RollbackIdentity"] = identity
+            candidate["RollbackVersion"] = (
+                candidate.get("AvailableVersion")
+                or format_version_tuple(package_version_tuple(candidate["FileName"]))
+            )
+            candidate["RollbackCurrentVersion"] = current_version or ""
+            candidates.append(candidate)
+
+        candidates.sort(key=lambda item: item.get("RollbackIdentity", ""))
+        return candidates
+
+    @staticmethod
+    def rollback_package(package_identity_name, artifact_path):
+        if not os.path.exists(artifact_path):
+            return False, "Rollback package is missing"
+
+        identity = StoreAPI._powershell_literal(package_identity_name)
+        package_path = StoreAPI._powershell_literal(os.path.abspath(artifact_path))
+        cmd = "\n".join([
+            "$ErrorActionPreference = 'Stop'",
+            f"$identity = {identity}",
+            f"$path = {package_path}",
+            "$current = Get-AppxPackage -Name $identity | Sort-Object Version -Descending | Select-Object -First 1",
+            "if ($current) {",
+            "    try {",
+            "        Remove-AppxPackage -Package $current.PackageFullName -PreserveApplicationData -ErrorAction Stop",
+            "    } catch {",
+            "        if ($_.Exception.Message -match 'PreserveApplicationData' -or $_.Exception.Message -match 'parameter') {",
+            "            Remove-AppxPackage -Package $current.PackageFullName -ErrorAction Stop",
+            "        } else {",
+            "            throw",
+            "        }",
+            "    }",
+            "}",
+            "Add-AppxPackage -Path $path -ErrorAction Stop",
+            "Write-Output \"Rollback installed $identity from $path\"",
+        ])
+
+        try:
+            result = subprocess.run(
+                [POWERSHELL_EXE, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            if result.returncode == 0:
+                return True, result.stdout.strip() or "Rollback installed"
+            return False, result.stderr.strip() or result.stdout.strip() or "Rollback failed"
+        except Exception as exc:
+            return False, str(exc)
 
     @staticmethod
     def _powershell_literal(value):
@@ -2681,7 +2866,7 @@ class MSStoreHelperApp(ctk.CTk):
         self.queue_count = ctk.CTkLabel(header_frame, text="0 items", font=("Segoe UI", 12), text_color=Theme.TEXT_MUTED)
         self.queue_count.pack(side="right")
         
-        self.queue_scroll = ctk.CTkScrollableFrame(self.right_panel, fg_color=Theme.BG_INPUT, corner_radius=8, height=170)
+        self.queue_scroll = ctk.CTkScrollableFrame(self.right_panel, fg_color=Theme.BG_INPUT, corner_radius=8, height=130)
         self.queue_scroll.pack(fill="x", padx=15, pady=(0, 8))
         
         self.queue_empty = ctk.CTkLabel(self.queue_scroll, text="📭\n\nNo files in queue\n\nSearch for apps or browse\ncategories to get started", font=("Segoe UI", 12), text_color=Theme.TEXT_MUTED, justify="center")
@@ -2744,7 +2929,10 @@ class MSStoreHelperApp(ctk.CTk):
         ctk.CTkButton(action_frame, text="🧾 Export DISM Script", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_dism_script).pack(fill="x", pady=(0, 5))
         ctk.CTkButton(action_frame, text="📄 Export AppInstaller", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_appinstaller_manifest).pack(fill="x", pady=(0, 5))
         ctk.CTkButton(action_frame, text="📦 Export IntuneWin", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_intunewin_package).pack(fill="x", pady=(0, 5))
-        ctk.CTkButton(action_frame, text="📦 Install Downloaded", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._start_install).pack(fill="x")
+        install_row = ctk.CTkFrame(action_frame, fg_color="transparent")
+        install_row.pack(fill="x")
+        ctk.CTkButton(install_row, text="📦 Install", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._start_install).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        ctk.CTkButton(install_row, text="↩ Rollback", height=38, font=("Segoe UI Semibold", 13), fg_color="transparent", border_width=1, border_color=Theme.WARNING, hover_color=Theme.BG_CARD_HOVER, command=self._start_rollback).pack(side="left", fill="x", expand=True, padx=(4, 0))
     
     def _build_log_panel(self):
         """Build the collapsible log/console panel"""
@@ -4109,6 +4297,97 @@ Fixes "needs to be online" and similar errors.
         self.after(0, lambda: self._update_status("✅ Downloads complete!", Theme.SUCCESS))
         self.after(0, lambda: self._log("SUCCESS", f"Download complete: {success_count}/{total} files successful"))
         self.after(0, lambda: self._log("INFO", f"Files saved to: {self.output_path}"))
+
+    def _rollback_cache_folders(self):
+        folders = [self.output_path]
+        if self.shared_cache_enabled.get():
+            folders.append(self.shared_cache_path)
+        for package in self.download_queue:
+            manifest_path = package.get("CacheManifest")
+            if manifest_path:
+                folders.append(os.path.dirname(manifest_path))
+
+        unique = []
+        seen = set()
+        for folder in folders:
+            folder = os.path.abspath(folder)
+            if folder.lower() in seen:
+                continue
+            seen.add(folder.lower())
+            unique.append(folder)
+        return unique
+
+    def _start_rollback(self):
+        if not IS_ADMIN:
+            self._update_status("⚠️ Administrator required", Theme.WARNING)
+            self._log("WARNING", "Rollback requires Administrator rights")
+            return
+
+        identities = [
+            (package.get("PackageIdentity") or package_identity(package["FileName"]))
+            for package in self.download_queue
+            if package.get("FileName") and not is_dependency_package(package)
+        ]
+        if not identities:
+            self._update_status("⚠️ Queue an app first", Theme.WARNING)
+            self._log("WARNING", "Rollback needs at least one queued app package identity")
+            return
+
+        cache_folders = self._rollback_cache_folders()
+        threading.Thread(target=self._rollback_worker, args=(identities, cache_folders), daemon=True).start()
+
+    def _rollback_worker(self, identities, cache_folders):
+        self.after(0, lambda: self._update_status("Finding cached rollback packages...", Theme.INFO))
+        identity_set = {identity.lower() for identity in identities if identity}
+        installed_versions = StoreAPI.get_installed_appx_versions()
+        current_versions = {}
+        for package in self.download_queue:
+            if not package.get("FileName") or is_dependency_package(package):
+                continue
+            identity = (package.get("PackageIdentity") or package_identity(package["FileName"])).lower()
+            if identity not in identity_set:
+                continue
+            current_versions[identity] = (
+                installed_versions.get(identity)
+                or package.get("AvailableVersion")
+                or format_version_tuple(package_version_tuple(package["FileName"]))
+            )
+
+        candidates = StoreAPI.rollback_candidates(
+            cache_folders,
+            identity_set,
+            current_versions,
+        )
+        if not candidates:
+            self.after(0, lambda: self._update_status("No rollback package found", Theme.WARNING))
+            self.after(0, lambda: self._log("WARNING", "No valid cached previous version was found for queued app identities"))
+            return
+
+        success_count = 0
+        for candidate in candidates:
+            path = candidate["Path"]
+            identity = candidate["RollbackIdentity"]
+            version = candidate.get("RollbackVersion", "unknown")
+            current = candidate.get("RollbackCurrentVersion") or "unknown"
+            self.after(0, lambda i=identity, v=version: self._update_status(f"Rolling back {i} to {v}...", Theme.INFO))
+            self.after(0, lambda i=identity, c=current, v=version, p=path: self._log("INFO", f"Rollback candidate for {i}: current={c}, rollback={v}, path={p}"))
+
+            signature_ok, signature_msg = StoreAPI.verify_package_signature(path)
+            if not signature_ok:
+                self.after(0, lambda i=identity, m=signature_msg: self._log("ERROR", f"Rollback signature check blocked {i}: {m}"))
+                continue
+
+            success, message = StoreAPI.rollback_package(identity, path)
+            if success:
+                success_count += 1
+                self.after(0, lambda i=identity, v=version: self._log("SUCCESS", f"Rolled back {i} to {v}"))
+            else:
+                self.after(0, lambda i=identity, m=message: self._log("ERROR", f"Rollback failed for {i}: {m}"))
+
+        if success_count:
+            self.after(0, lambda c=success_count: self._update_status(f"Rollback complete: {c} package(s)", Theme.SUCCESS))
+        else:
+            self.after(0, lambda: self._update_status("Rollback failed", Theme.DANGER))
     
     def _start_install(self):
         if not IS_ADMIN:
