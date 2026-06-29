@@ -2,6 +2,12 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.33.0] - 2026-06-29
+
+- Added cached package manifest diffs for capabilities and dependencies between the newest two cached versions.
+- Changed the queue action row to expose a Diff command alongside Install and Rollback.
+- Added tests for AppX manifest diff parsing, formatting, and cached-version pair selection.
+
 ## [v3.32.0] - 2026-06-29
 
 - Added bounded rollback cache history that keeps the last two AppX/MSIX versions per package identity.

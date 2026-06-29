@@ -92,7 +92,7 @@ from bs4 import BeautifulSoup
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.32.0"
+APP_VERSION = "3.33.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -1491,7 +1491,7 @@ class StoreAPI:
         return tag.rsplit("}", 1)[-1] if "}" in tag else tag
 
     @staticmethod
-    def read_appx_identity(package_path):
+    def _read_appx_manifest_root(package_path):
         manifest_names = (
             "AppxManifest.xml",
             "AppxMetadata/AppxBundleManifest.xml",
@@ -1502,10 +1502,12 @@ class StoreAPI:
                 manifest_name = next((available[name] for name in manifest_names if name in available), None)
                 if not manifest_name:
                     raise ValueError("AppX manifest was not found")
-                root = ET.fromstring(archive.read(manifest_name))
+                return ET.fromstring(archive.read(manifest_name)), manifest_name
         except zipfile.BadZipFile as exc:
             raise ValueError(f"Package is not a readable AppX/MSIX archive: {package_path}") from exc
 
+    @staticmethod
+    def _appx_identity_from_root(root, package_path):
         identity = None
         for element in root.iter():
             if StoreAPI._xml_local_name(element.tag) == "Identity":
@@ -1527,6 +1529,143 @@ class StoreAPI:
             "Version": version,
             "ProcessorArchitecture": architecture or "neutral",
         }
+
+    @staticmethod
+    def read_appx_identity(package_path):
+        root, _manifest_name = StoreAPI._read_appx_manifest_root(package_path)
+        return StoreAPI._appx_identity_from_root(root, package_path)
+
+    @staticmethod
+    def _dependency_label(element):
+        local_name = StoreAPI._xml_local_name(element.tag)
+        attrs = element.attrib
+        if local_name == "PackageDependency":
+            name = attrs.get("Name", "").strip()
+            min_version = attrs.get("MinVersion", "").strip()
+            publisher = attrs.get("Publisher", "").strip()
+            label = f"{name} >= {min_version}" if min_version else name
+            if publisher:
+                label = f"{label} ({publisher})"
+            return label.strip()
+        if local_name == "TargetDeviceFamily":
+            name = attrs.get("Name", "").strip()
+            minimum = attrs.get("MinVersion", "").strip()
+            tested = attrs.get("MaxVersionTested", "").strip()
+            pieces = [name]
+            if minimum:
+                pieces.append(f"min {minimum}")
+            if tested:
+                pieces.append(f"tested {tested}")
+            return " ".join(piece for piece in pieces if piece).strip()
+        return ""
+
+    @staticmethod
+    def read_appx_manifest_details(package_path):
+        root, manifest_name = StoreAPI._read_appx_manifest_root(package_path)
+        identity = StoreAPI._appx_identity_from_root(root, package_path)
+        capabilities = set()
+        dependencies = set()
+
+        for container in root.iter():
+            container_name = StoreAPI._xml_local_name(container.tag)
+            if container_name == "Capabilities":
+                for element in container:
+                    local_name = StoreAPI._xml_local_name(element.tag)
+                    if local_name in {"Capability", "DeviceCapability", "CustomCapability"}:
+                        name = element.attrib.get("Name", "").strip()
+                        if name:
+                            capabilities.add(f"{local_name}: {name}")
+            elif container_name == "Dependencies":
+                for element in container:
+                    local_name = StoreAPI._xml_local_name(element.tag)
+                    if local_name in {"PackageDependency", "TargetDeviceFamily"}:
+                        label = StoreAPI._dependency_label(element)
+                        if label:
+                            dependencies.add(f"{local_name}: {label}")
+
+        return {
+            "Path": os.path.abspath(package_path),
+            "ManifestName": manifest_name,
+            "Identity": identity,
+            "Capabilities": sorted(capabilities),
+            "Dependencies": sorted(dependencies),
+        }
+
+    @staticmethod
+    def _set_diff(old_values, new_values):
+        old_set = set(old_values or [])
+        new_set = set(new_values or [])
+        return {
+            "Added": sorted(new_set - old_set),
+            "Removed": sorted(old_set - new_set),
+            "Unchanged": sorted(old_set & new_set),
+        }
+
+    @staticmethod
+    def diff_appx_manifests(old_package_path, new_package_path):
+        old_details = StoreAPI.read_appx_manifest_details(old_package_path)
+        new_details = StoreAPI.read_appx_manifest_details(new_package_path)
+        return {
+            "Old": old_details,
+            "New": new_details,
+            "IdentityChanged": old_details["Identity"]["Name"] != new_details["Identity"]["Name"],
+            "VersionChanged": old_details["Identity"]["Version"] != new_details["Identity"]["Version"],
+            "Capabilities": StoreAPI._set_diff(old_details["Capabilities"], new_details["Capabilities"]),
+            "Dependencies": StoreAPI._set_diff(old_details["Dependencies"], new_details["Dependencies"]),
+        }
+
+    @staticmethod
+    def package_diff_candidates(cache_folders, package_identities=None):
+        grouped = {}
+        for entry in StoreAPI.cache_history_entries(cache_folders, package_identities):
+            identity = str(entry.get("PackageIdentity", "")).lower()
+            grouped.setdefault(identity, []).append(entry)
+
+        candidates = []
+        for identity, entries in grouped.items():
+            entries.sort(
+                key=lambda item: (StoreAPI._metadata_version_key(item), item.get("CachedAt", "")),
+                reverse=True,
+            )
+            if len(entries) < 2:
+                continue
+            newest, previous = entries[0], entries[1]
+            candidates.append({
+                "PackageIdentity": identity,
+                "Old": previous,
+                "New": newest,
+            })
+        candidates.sort(key=lambda item: item["PackageIdentity"])
+        return candidates
+
+    @staticmethod
+    def format_package_diff(diff):
+        old_identity = diff["Old"]["Identity"]
+        new_identity = diff["New"]["Identity"]
+        lines = [
+            f"{new_identity['Name']}",
+            f"Old: {old_identity['Version']} ({diff['Old']['ManifestName']})",
+            f"New: {new_identity['Version']} ({diff['New']['ManifestName']})",
+            "",
+        ]
+        if diff.get("IdentityChanged"):
+            lines.append(f"Identity changed: {old_identity['Name']} -> {new_identity['Name']}")
+            lines.append("")
+
+        for section in ("Capabilities", "Dependencies"):
+            lines.append(section)
+            changes = diff[section]
+            changed = False
+            for label, key in (("Added", "Added"), ("Removed", "Removed")):
+                for item in changes[key]:
+                    lines.append(f"  {label}: {item}")
+                    changed = True
+            if not changed:
+                lines.append("  No changes")
+            if changes["Unchanged"]:
+                lines.append(f"  Unchanged: {len(changes['Unchanged'])}")
+            lines.append("")
+        return "\n".join(lines).strip()
 
     @staticmethod
     def _file_uri(path):
@@ -2931,8 +3070,9 @@ class MSStoreHelperApp(ctk.CTk):
         ctk.CTkButton(action_frame, text="📦 Export IntuneWin", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_intunewin_package).pack(fill="x", pady=(0, 5))
         install_row = ctk.CTkFrame(action_frame, fg_color="transparent")
         install_row.pack(fill="x")
-        ctk.CTkButton(install_row, text="📦 Install", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._start_install).pack(side="left", fill="x", expand=True, padx=(0, 4))
-        ctk.CTkButton(install_row, text="↩ Rollback", height=38, font=("Segoe UI Semibold", 13), fg_color="transparent", border_width=1, border_color=Theme.WARNING, hover_color=Theme.BG_CARD_HOVER, command=self._start_rollback).pack(side="left", fill="x", expand=True, padx=(4, 0))
+        ctk.CTkButton(install_row, text="📦 Install", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._start_install).pack(side="left", fill="x", expand=True, padx=(0, 3))
+        ctk.CTkButton(install_row, text="↩ Rollback", height=38, font=("Segoe UI Semibold", 13), fg_color="transparent", border_width=1, border_color=Theme.WARNING, hover_color=Theme.BG_CARD_HOVER, command=self._start_rollback).pack(side="left", fill="x", expand=True, padx=3)
+        ctk.CTkButton(install_row, text="Diff", height=38, font=("Segoe UI Semibold", 13), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._show_package_diff).pack(side="left", fill="x", expand=True, padx=(3, 0))
     
     def _build_log_panel(self):
         """Build the collapsible log/console panel"""
@@ -4317,17 +4457,84 @@ Fixes "needs to be online" and similar errors.
             unique.append(folder)
         return unique
 
+    def _queued_app_identities(self):
+        return [
+            (package.get("PackageIdentity") or package_identity(package["FileName"]))
+            for package in self.download_queue
+            if package.get("FileName") and not is_dependency_package(package)
+        ]
+
+    def _show_package_diff(self):
+        identities = self._queued_app_identities()
+        if not identities:
+            self._update_status("⚠️ Queue an app first", Theme.WARNING)
+            self._log("WARNING", "Package diff needs at least one queued app package identity")
+            return
+
+        cache_folders = self._rollback_cache_folders()
+        self._update_status("Comparing cached package versions...", Theme.INFO)
+        threading.Thread(target=self._package_diff_worker, args=(identities, cache_folders), daemon=True).start()
+
+    def _package_diff_worker(self, identities, cache_folders):
+        identity_set = {identity.lower() for identity in identities if identity}
+        candidates = StoreAPI.package_diff_candidates(cache_folders, identity_set)
+        if not candidates:
+            self.after(0, lambda: self._update_status("No package diff available", Theme.WARNING))
+            self.after(0, lambda: self._log("WARNING", "Package diff needs two valid cached versions for a queued app identity"))
+            return
+
+        sections = []
+        for candidate in candidates:
+            try:
+                diff = StoreAPI.diff_appx_manifests(candidate["Old"]["Path"], candidate["New"]["Path"])
+                sections.append(StoreAPI.format_package_diff(diff))
+            except Exception as exc:
+                identity = candidate.get("PackageIdentity", "package")
+                sections.append(f"{identity}\nDiff failed: {exc}")
+
+        report = "\n\n" + ("-" * 60) + "\n\n"
+        report = report.join(sections)
+        self.after(0, lambda: self._update_status("Package diff ready", Theme.SUCCESS))
+        self.after(0, lambda c=len(sections): self._log("SUCCESS", f"Package diff generated for {c} cached package pair(s)"))
+        self.after(0, lambda text=report: self._show_package_diff_dialog(text))
+
+    def _show_package_diff_dialog(self, text):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Package Diff")
+        dialog.geometry("720x560")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        content = ctk.CTkFrame(dialog, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=22, pady=22)
+        ctk.CTkLabel(content, text="Package Diff", font=("Segoe UI Semibold", 20), anchor="w").pack(fill="x")
+        ctk.CTkLabel(content, text="Cached manifest capability and dependency changes", font=("Segoe UI", 11), text_color=Theme.TEXT_MUTED, anchor="w").pack(fill="x", pady=(2, 12))
+
+        textbox = ctk.CTkTextbox(content, font=("Consolas", 11), fg_color=Theme.BG_DARK, text_color=Theme.TEXT_SECONDARY, wrap="word")
+        textbox.pack(fill="both", expand=True)
+        textbox.insert("1.0", text)
+        textbox.configure(state="disabled")
+
+        ctk.CTkButton(
+            content,
+            text="Close",
+            width=90,
+            height=32,
+            font=("Segoe UI", 12),
+            fg_color="transparent",
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=dialog.destroy,
+        ).pack(side="right", pady=(12, 0))
+
     def _start_rollback(self):
         if not IS_ADMIN:
             self._update_status("⚠️ Administrator required", Theme.WARNING)
             self._log("WARNING", "Rollback requires Administrator rights")
             return
 
-        identities = [
-            (package.get("PackageIdentity") or package_identity(package["FileName"]))
-            for package in self.download_queue
-            if package.get("FileName") and not is_dependency_package(package)
-        ]
+        identities = self._queued_app_identities()
         if not identities:
             self._update_status("⚠️ Queue an app first", Theme.WARNING)
             self._log("WARNING", "Rollback needs at least one queued app package identity")

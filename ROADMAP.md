@@ -11,7 +11,6 @@ GUI tool to download/install Microsoft Store apps without the Store UI. Planned 
 - **UUPDump** — sister-tool UX pattern: script-emit workflow for offline scenarios, worth mirroring for fleet installs.
 
 ## Nice-to-Haves
-- Package diff: show what permissions/dependencies changed between two versions
 - CLI twin for headless use via RMM (`MSStoreHelper.py --install Microsoft.WindowsTerminal`)
 - Telemetry-free mirror mode: pre-download and serve Store packages from a local HTTP cache for multi-PC clinics
 
