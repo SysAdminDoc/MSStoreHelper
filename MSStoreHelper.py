@@ -18,6 +18,8 @@ import hashlib
 import shutil
 import tempfile
 import zipfile
+import xml.etree.ElementTree as ET
+from pathlib import Path
 try:
     import winreg
 except ImportError:
@@ -88,7 +90,7 @@ from bs4 import BeautifulSoup
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.27.0"
+APP_VERSION = "3.28.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -105,6 +107,7 @@ THEME_MODE_VALUES = ["System", "Dark", "Light"]
 STORE_RING_VALUES = ["Retail", "RP", "WIS", "WIF"]
 STORE_LANGUAGE_VALUES = ["en-US", "en-GB", "de-DE", "fr-FR", "es-ES", "it-IT", "ja-JP", "ko-KR", "pt-BR", "zh-CN", "zh-TW"]
 STORE_MARKET_VALUES = ["US", "GB", "CA", "AU", "DE", "FR", "ES", "IT", "JP", "KR", "BR", "CN", "TW"]
+APPINSTALLER_NS = "http://schemas.microsoft.com/appx/appinstaller/2021"
 WINDOWS_DIR = os.environ.get("WINDIR", r"C:\Windows")
 WINDOWS_POWERSHELL = os.path.join(WINDOWS_DIR, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 POWERSHELL_EXE = WINDOWS_POWERSHELL if os.path.exists(WINDOWS_POWERSHELL) else "powershell"
@@ -1200,6 +1203,177 @@ class StoreAPI:
         return script_path
 
     @staticmethod
+    def _xml_local_name(tag):
+        return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+    @staticmethod
+    def read_appx_identity(package_path):
+        manifest_names = (
+            "AppxManifest.xml",
+            "AppxMetadata/AppxBundleManifest.xml",
+        )
+        try:
+            with zipfile.ZipFile(package_path) as archive:
+                available = {name.replace("\\", "/"): name for name in archive.namelist()}
+                manifest_name = next((available[name] for name in manifest_names if name in available), None)
+                if not manifest_name:
+                    raise ValueError("AppX manifest was not found")
+                root = ET.fromstring(archive.read(manifest_name))
+        except zipfile.BadZipFile as exc:
+            raise ValueError(f"Package is not a readable AppX/MSIX archive: {package_path}") from exc
+
+        identity = None
+        for element in root.iter():
+            if StoreAPI._xml_local_name(element.tag) == "Identity":
+                identity = element
+                break
+        if identity is None:
+            raise ValueError(f"Package identity was not found: {package_path}")
+
+        name = identity.attrib.get("Name", "").strip()
+        publisher = identity.attrib.get("Publisher", "").strip()
+        version = identity.attrib.get("Version", "").strip()
+        architecture = identity.attrib.get("ProcessorArchitecture", "").strip().lower()
+        if not name or not publisher or not version:
+            raise ValueError(f"Package identity is incomplete: {package_path}")
+
+        return {
+            "Name": name,
+            "Publisher": publisher,
+            "Version": version,
+            "ProcessorArchitecture": architecture or "neutral",
+        }
+
+    @staticmethod
+    def _file_uri(path):
+        return Path(os.path.abspath(path)).as_uri()
+
+    @staticmethod
+    def _appinstaller_package_tag(record, main=False):
+        if record["IsBundle"]:
+            return "MainBundle" if main else "Bundle"
+        return "MainPackage" if main else "Package"
+
+    @staticmethod
+    def _appinstaller_record(package, output_path, package_dir):
+        source_path = StoreAPI._queue_package_source_path(package, output_path)
+        if not os.path.exists(source_path):
+            raise ValueError(f"Downloaded file is missing: {package.get('FileName')}")
+
+        filename = package.get("FileName") or os.path.basename(source_path)
+        destination = os.path.join(package_dir, filename)
+        if os.path.abspath(source_path).lower() != os.path.abspath(destination).lower():
+            shutil.copy2(source_path, destination)
+
+        identity = StoreAPI.read_appx_identity(destination)
+        is_bundle = filename.lower().endswith(("appxbundle", "msixbundle"))
+        architecture = identity.get("ProcessorArchitecture") or package.get("Architecture") or "neutral"
+        return {
+            "FileName": filename,
+            "Path": destination,
+            "Uri": StoreAPI._file_uri(destination),
+            "Name": identity["Name"],
+            "Publisher": identity["Publisher"],
+            "Version": identity["Version"],
+            "ProcessorArchitecture": architecture.lower(),
+            "IsBundle": is_bundle,
+            "Role": package.get("PackageRoleLabel") or package_role_label(filename),
+            "StoreQuery": StoreAPI._package_store_query(package),
+        }
+
+    @staticmethod
+    def generate_appinstaller_manifest(records, appinstaller_path, hours_between_update_checks=12):
+        if not records:
+            raise ValueError("No AppX/MSIX packages are available for App Installer export")
+
+        apps = [record for record in records if record["Role"] == "App"]
+        if not apps:
+            raise ValueError("App Installer export requires at least one app package")
+
+        main = apps[0]
+        dependencies = [record for record in records if record["Role"] != "App"]
+        optional = apps[1:]
+
+        ET.register_namespace("", APPINSTALLER_NS)
+        root = ET.Element(
+            f"{{{APPINSTALLER_NS}}}AppInstaller",
+            {
+                "Version": main["Version"],
+                "Uri": StoreAPI._file_uri(appinstaller_path),
+            },
+        )
+
+        def add_package(parent, record, main_package=False):
+            attributes = {
+                "Name": record["Name"],
+                "Publisher": record["Publisher"],
+                "Version": record["Version"],
+                "Uri": record["Uri"],
+            }
+            if not record["IsBundle"]:
+                attributes["ProcessorArchitecture"] = record["ProcessorArchitecture"]
+            ET.SubElement(parent, f"{{{APPINSTALLER_NS}}}{StoreAPI._appinstaller_package_tag(record, main_package)}", attributes)
+
+        add_package(root, main, main_package=True)
+
+        if dependencies:
+            deps = ET.SubElement(root, f"{{{APPINSTALLER_NS}}}Dependencies")
+            for record in dependencies:
+                add_package(deps, record)
+
+        if optional:
+            optional_packages = ET.SubElement(root, f"{{{APPINSTALLER_NS}}}OptionalPackages")
+            for record in optional:
+                add_package(optional_packages, record)
+
+        update_settings = ET.SubElement(root, f"{{{APPINSTALLER_NS}}}UpdateSettings")
+        ET.SubElement(
+            update_settings,
+            f"{{{APPINSTALLER_NS}}}OnLaunch",
+            {
+                "HoursBetweenUpdateChecks": str(int(hours_between_update_checks)),
+                "ShowPrompt": "true",
+                "UpdateBlocksActivation": "false",
+            },
+        )
+
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True).decode("utf-8")
+
+    @staticmethod
+    def write_appinstaller_export(packages, output_path, appinstaller_path, target_arch=SYSTEM_ARCH):
+        installable = [
+            annotate_package(package.copy())
+            for package in packages
+            if package.get("FileName") and is_installable_package(package)
+        ]
+        installable = StoreAPI.order_packages_for_install(installable, target_arch)
+        if not installable:
+            raise ValueError("No AppX/MSIX packages are available for App Installer export")
+
+        appinstaller_path = os.path.abspath(appinstaller_path)
+        export_dir = os.path.dirname(appinstaller_path)
+        os.makedirs(export_dir, exist_ok=True)
+        package_dir = os.path.join(export_dir, f"{StoreAPI._safe_filename_stem(appinstaller_path, 'MSStoreHelper-AppInstaller')}-Packages")
+        if os.path.isdir(package_dir):
+            if os.path.commonpath([export_dir, os.path.abspath(package_dir)]) != export_dir:
+                raise ValueError("Invalid App Installer package path")
+            shutil.rmtree(package_dir)
+        os.makedirs(package_dir, exist_ok=True)
+
+        records = [StoreAPI._appinstaller_record(package, output_path, package_dir) for package in installable]
+        manifest = StoreAPI.generate_appinstaller_manifest(records, appinstaller_path)
+        with open(appinstaller_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(manifest)
+            handle.write("\n")
+
+        return {
+            "AppInstallerPath": appinstaller_path,
+            "PackageDir": package_dir,
+            "PackageCount": len(records),
+            "MainPackage": next(record["Name"] for record in records if record["Role"] == "App"),
+        }
+
+    @staticmethod
     def get_winget_version():
         try:
             result = subprocess.run(
@@ -2253,20 +2427,20 @@ class MSStoreHelperApp(ctk.CTk):
         self.queue_count = ctk.CTkLabel(header_frame, text="0 items", font=("Segoe UI", 12), text_color=Theme.TEXT_MUTED)
         self.queue_count.pack(side="right")
         
-        self.queue_scroll = ctk.CTkScrollableFrame(self.right_panel, fg_color=Theme.BG_INPUT, corner_radius=8, height=210)
-        self.queue_scroll.pack(fill="x", padx=15, pady=(0, 10))
+        self.queue_scroll = ctk.CTkScrollableFrame(self.right_panel, fg_color=Theme.BG_INPUT, corner_radius=8, height=170)
+        self.queue_scroll.pack(fill="x", padx=15, pady=(0, 8))
         
         self.queue_empty = ctk.CTkLabel(self.queue_scroll, text="📭\n\nNo files in queue\n\nSearch for apps or browse\ncategories to get started", font=("Segoe UI", 12), text_color=Theme.TEXT_MUTED, justify="center")
-        self.queue_empty.pack(expand=True, pady=40)
+        self.queue_empty.pack(expand=True, pady=25)
         
         btn_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=15, pady=(0, 10))
+        btn_frame.pack(fill="x", padx=15, pady=(0, 8))
         
         ctk.CTkButton(btn_frame, text="Clear", width=70, height=32, font=("Segoe UI", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._clear_queue).pack(side="left")
         ctk.CTkButton(btn_frame, text="Diagnostics", width=110, height=32, font=("Segoe UI", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_diagnostics_bundle).pack(side="right")
 
         cache_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
-        cache_frame.pack(fill="x", padx=15, pady=(0, 10))
+        cache_frame.pack(fill="x", padx=15, pady=(0, 8))
 
         ctk.CTkCheckBox(
             cache_frame,
@@ -2297,25 +2471,26 @@ class MSStoreHelperApp(ctk.CTk):
             text_color=Theme.TEXT_MUTED,
             anchor="w",
         )
-        self.shared_cache_label.pack(fill="x", padx=15, pady=(0, 10))
+        self.shared_cache_label.pack(fill="x", padx=15, pady=(0, 8))
         
         progress_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
-        progress_frame.pack(fill="x", padx=15, pady=(0, 10))
+        progress_frame.pack(fill="x", padx=15, pady=(0, 8))
         
         self.progress_label = ctk.CTkLabel(progress_frame, text="Ready", font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY)
         self.progress_label.pack(fill="x")
         
         self.progress_bar = ctk.CTkProgressBar(progress_frame, height=8, corner_radius=4, fg_color=Theme.BG_INPUT, progress_color=Theme.PRIMARY)
-        self.progress_bar.pack(fill="x", pady=(6, 0))
+        self.progress_bar.pack(fill="x", pady=(4, 0))
         self.progress_bar.set(0)
         
         action_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
-        action_frame.pack(fill="x", padx=15, pady=(0, 20))
+        action_frame.pack(fill="x", padx=15, pady=(0, 10))
         
-        ctk.CTkButton(action_frame, text="⬇️ Download All", height=42, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._start_download).pack(fill="x", pady=(0, 8))
-        ctk.CTkButton(action_frame, text="🧾 Export DISM Script", height=38, font=("Segoe UI Semibold", 13), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_dism_script).pack(fill="x", pady=(0, 8))
-        ctk.CTkButton(action_frame, text="📦 Export IntuneWin", height=38, font=("Segoe UI Semibold", 13), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_intunewin_package).pack(fill="x", pady=(0, 8))
-        ctk.CTkButton(action_frame, text="📦 Install Downloaded", height=42, font=("Segoe UI Semibold", 13), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._start_install).pack(fill="x")
+        ctk.CTkButton(action_frame, text="⬇️ Download All", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._start_download).pack(fill="x", pady=(0, 5))
+        ctk.CTkButton(action_frame, text="🧾 Export DISM Script", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_dism_script).pack(fill="x", pady=(0, 5))
+        ctk.CTkButton(action_frame, text="📄 Export AppInstaller", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_appinstaller_manifest).pack(fill="x", pady=(0, 5))
+        ctk.CTkButton(action_frame, text="📦 Export IntuneWin", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_intunewin_package).pack(fill="x", pady=(0, 5))
+        ctk.CTkButton(action_frame, text="📦 Install Downloaded", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._start_install).pack(fill="x")
     
     def _build_log_panel(self):
         """Build the collapsible log/console panel"""
@@ -2653,6 +2828,9 @@ Click "Get Files" or select apps and click "Get Selected Apps".
 
 📋 WinGet Export
 Select apps and click "Export WinGet" to save an import manifest.
+
+📄 App Installer Export
+Download queued packages, then export a .appinstaller manifest and package folder.
 
 📝 Release Notes
 Click "Notes" on any app row to fetch Store product page notes.
@@ -3407,6 +3585,44 @@ Fixes "needs to be online" and similar errors.
         else:
             self._update_status("✅ DISM script exported", Theme.SUCCESS)
             self._log("SUCCESS", f"DISM provisioning script saved: {script_path}")
+
+    def _export_appinstaller_manifest(self):
+        if not self.download_queue:
+            self._update_status("⚠️ Queue is empty", Theme.WARNING)
+            self._log("WARNING", "No queued files to export as App Installer")
+            return
+
+        initial_dir = self.output_path if os.path.exists(self.output_path) else DEFAULT_OUTPUT
+        os.makedirs(initial_dir, exist_ok=True)
+        appinstaller_path = filedialog.asksaveasfilename(
+            title="Save App Installer manifest",
+            initialdir=initial_dir,
+            initialfile="MSStoreHelper-Queue.appinstaller",
+            defaultextension=".appinstaller",
+            filetypes=[("App Installer manifest", "*.appinstaller"), ("All files", "*.*")],
+        )
+        if not appinstaller_path:
+            return
+
+        try:
+            result = StoreAPI.write_appinstaller_export(
+                self.download_queue,
+                self.output_path,
+                appinstaller_path,
+                self._target_arch(),
+            )
+        except ValueError as exc:
+            self._update_status("⚠️ AppInstaller export skipped", Theme.WARNING)
+            self._log("WARNING", str(exc))
+        except Exception as exc:
+            self._update_status("❌ AppInstaller export failed", Theme.DANGER)
+            self._log("ERROR", f"Failed to export App Installer manifest: {exc}")
+        else:
+            self._update_status("✅ AppInstaller exported", Theme.SUCCESS)
+            self._log(
+                "SUCCESS",
+                f"App Installer manifest saved: {result['AppInstallerPath']} ({result['PackageCount']} package(s)); packages: {result['PackageDir']}",
+            )
 
     def _export_intunewin_package(self):
         if not self.download_queue:

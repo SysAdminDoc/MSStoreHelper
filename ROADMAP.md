@@ -48,9 +48,3 @@ GUI tool to download/install Microsoft Store apps without the Store UI. Planned 
 
 ## Research-Driven Additions
 
-- [ ] P3 - App Installer manifest export
-  Why: Microsoft supports `.appinstaller` files with update settings, offering a lightweight distribution path between one-off installs and full Intune packaging.
-  Evidence: Microsoft App Installer docs, `Add-AppxPackage -AppInstallerFile`, existing DISM/WinGet/Intune export flows.
-  Touches: export actions, package metadata, README, tests for generated XML.
-  Acceptance: queued packages can export a valid `.appinstaller` plus package folder, and Windows can install it with `Add-AppxPackage -AppInstallerFile` on a test machine.
-  Complexity: M

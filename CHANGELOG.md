@@ -2,6 +2,12 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.28.0] - 2026-06-29
+
+- Added App Installer `.appinstaller` export for downloaded AppX/MSIX queues with copied package folders and OnLaunch update settings.
+- Changed the queue panel to expose an AppInstaller export action alongside DISM and IntuneWin exports while preserving the default layout.
+- Added tests for AppX identity parsing, generated App Installer XML, package copying, and missing-download errors.
+
 ## [v3.27.0] - 2026-06-28
 
 - Added persisted Store query controls for RG-Adguard ring, Store language, and market.
