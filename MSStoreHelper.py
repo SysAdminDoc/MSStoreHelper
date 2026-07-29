@@ -95,7 +95,7 @@ from bs4 import BeautifulSoup
 
 # ==================== CONFIGURATION ====================
 
-APP_VERSION = "3.35.0"
+APP_VERSION = "3.36.0"
 APP_NAME = "MSStoreHelper"
 API_URL = "https://store.rg-adguard.net/api/GetFiles"
 STORE_SEARCH_URL = "https://storeedgefd.dsx.mp.microsoft.com/v9.0/manifestSearch"
@@ -156,36 +156,39 @@ SYSTEM_ARCH = get_architecture()
 
 # ==================== COLOR THEME ====================
 class Theme:
-    DEFAULT_ACCENT = "#6366f1"
+    DEFAULT_ACCENT = "#0f82f2"
     MODE = "Dark"
 
-    # Main colors
-    BG_DARK = ("#f5f7fb", "#0f0f1a")
-    BG_CARD = ("#ffffff", "#1a1a2e")
-    BG_CARD_HOVER = ("#e8eef8", "#252542")
-    BG_INPUT = ("#edf2f8", "#16213e")
+    # Graphite workspace surfaces
+    BG_DARK = ("#f4f6f8", "#10151a")
+    BG_SIDEBAR = ("#eef2f5", "#141a20")
+    BG_CARD = ("#ffffff", "#171e24")
+    BG_ELEVATED = ("#f8fafc", "#1b232b")
+    BG_CARD_HOVER = ("#e7eef5", "#202a33")
+    BG_INPUT = ("#edf2f6", "#11181e")
     
     # Accent colors
     PRIMARY = DEFAULT_ACCENT
-    PRIMARY_HOVER = ("#4f46e5", "#818cf8")
-    PRIMARY_OUTLINE_TEXT = ("#4338ca", "#c4b5fd")
-    SUCCESS = ("#059669", "#10b981")
-    SUCCESS_HOVER = ("#047857", "#34d399")
-    WARNING = ("#b45309", "#f59e0b")
-    DANGER = ("#dc2626", "#ef4444")
-    DANGER_HOVER = ("#b91c1c", "#f87171")
-    INFO = ("#0891b2", "#06b6d4")
+    PRIMARY_HOVER = ("#086fcf", "#43a1ff")
+    PRIMARY_OUTLINE_TEXT = ("#075eab", "#75baff")
+    SUCCESS = ("#087a55", "#25b780")
+    SUCCESS_HOVER = ("#066846", "#42c996")
+    WARNING = ("#985b00", "#f0aa32")
+    DANGER = ("#c72c3b", "#ef5965")
+    DANGER_HOVER = ("#a92331", "#f27b84")
+    INFO = ("#0876a8", "#40b5e5")
     
     # Text colors
-    TEXT_PRIMARY = ("#0f172a", "#f8fafc")
-    TEXT_SECONDARY = ("#475569", "#94a3b8")
-    TEXT_MUTED = ("#64748b", "#64748b")
+    TEXT_PRIMARY = ("#101820", "#f3f6f8")
+    TEXT_SECONDARY = ("#3f5263", "#b8c2ca")
+    TEXT_MUTED = ("#526678", "#9aa6af")
     
     # Special
-    BORDER = ("#cbd5e1", "#2a2a4a")
-    BUNDLE_COLOR = ("#0891b2", "#22d3ee")
-    ENCRYPTED_COLOR = ("#dc2626", "#f87171")
-    ARCH_MATCH = ("#16a34a", "#4ade80")
+    BORDER = ("#c7d0da", "#35414b")
+    BORDER_SUBTLE = ("#dce2e8", "#28333c")
+    BUNDLE_COLOR = ("#0876a8", "#40b5e5")
+    ENCRYPTED_COLOR = ("#c72c3b", "#ef5965")
+    ARCH_MATCH = ("#087a55", "#4bd3a0")
 
     @staticmethod
     def normalize_mode(mode):
@@ -2794,7 +2797,7 @@ function Backup-MSStoreHelperRegistryPath {{
 
 class ModernCard(ctk.CTkFrame):
     def __init__(self, master, **kwargs):
-        super().__init__(master, fg_color=Theme.BG_CARD, corner_radius=12, border_width=1, border_color=Theme.BORDER, **kwargs)
+        super().__init__(master, fg_color=Theme.BG_CARD, corner_radius=8, border_width=1, border_color=Theme.BORDER_SUBTLE, **kwargs)
 
 
 class AppTile(ctk.CTkFrame):
@@ -2806,19 +2809,19 @@ class AppTile(ctk.CTkFrame):
         self.on_release_notes = on_release_notes
         self.selected = ctk.BooleanVar(value=False)
         
-        self.container = ctk.CTkFrame(self, fg_color=Theme.BG_CARD, corner_radius=10, border_width=1, border_color=Theme.BORDER)
-        self.container.pack(fill="x", pady=4, padx=2)
+        self.container = ctk.CTkFrame(self, fg_color=Theme.BG_CARD, corner_radius=6, border_width=1, border_color=Theme.BORDER_SUBTLE)
+        self.container.pack(fill="x", pady=3, padx=1)
         self.container.grid_columnconfigure(1, weight=1)
         
         ctk.CTkLabel(self.container, text=app_data.get("Icon", "📦"), font=("Segoe UI Emoji", 24), width=50).grid(row=0, column=0, rowspan=2, padx=(15, 10), pady=12)
         ctk.CTkLabel(self.container, text=app_data["Name"], font=("Segoe UI Semibold", 14), anchor="w").grid(row=0, column=1, sticky="sw", padx=5, pady=(12, 0))
-        ctk.CTkLabel(self.container, text=app_data.get("Description", ""), font=("Segoe UI", 11), text_color=Theme.TEXT_SECONDARY, anchor="w").grid(row=1, column=1, sticky="nw", padx=5, pady=(0, 12))
+        ctk.CTkLabel(self.container, text=app_data.get("Description", ""), font=("Segoe UI", 11), text_color=Theme.TEXT_SECONDARY, anchor="w", justify="left", wraplength=200).grid(row=1, column=1, sticky="nw", padx=5, pady=(0, 12))
         
         btn_frame = ctk.CTkFrame(self.container, fg_color="transparent")
         btn_frame.grid(row=0, column=2, rowspan=2, padx=10)
 
-        ctk.CTkButton(btn_frame, text="Notes", width=58, height=28, font=("Segoe UI", 11), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=lambda: self.on_release_notes(self.app_data)).pack(side="left", padx=3)
-        self.chk = ctk.CTkCheckBox(btn_frame, text="", variable=self.selected, width=24, command=self._toggle, fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER)
+        ctk.CTkButton(btn_frame, text="Notes", width=58, height=28, font=("Segoe UI", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=lambda: self.on_release_notes(self.app_data)).pack(side="left", padx=3)
+        self.chk = ctk.CTkCheckBox(btn_frame, text="Select", variable=self.selected, width=58, font=("Segoe UI", 10), command=self._toggle, fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER)
         self.chk.pack(side="left", padx=5)
         
         self.container.bind("<Enter>", lambda e: self.container.configure(fg_color=Theme.BG_CARD_HOVER))
@@ -2835,22 +2838,22 @@ class SearchResultTile(ctk.CTkFrame):
         self.app_data = app_data
         self.selected = ctk.BooleanVar(value=False)
         
-        self.container = ctk.CTkFrame(self, fg_color=Theme.BG_CARD, corner_radius=10, border_width=1, border_color=Theme.BORDER)
-        self.container.pack(fill="x", pady=4, padx=2)
+        self.container = ctk.CTkFrame(self, fg_color=Theme.BG_CARD, corner_radius=6, border_width=1, border_color=Theme.BORDER_SUBTLE)
+        self.container.pack(fill="x", pady=3, padx=1)
         self.container.grid_columnconfigure(1, weight=1)
         
         ctk.CTkLabel(self.container, text="📱", font=("Segoe UI Emoji", 20), width=45).grid(row=0, column=0, rowspan=2, padx=(15, 10), pady=10)
         ctk.CTkLabel(self.container, text=app_data.get("Name", "Unknown"), font=("Segoe UI Semibold", 13), anchor="w").grid(row=0, column=1, sticky="sw", padx=5, pady=(10, 0))
         
         info = f"{app_data.get('Publisher', '')}  •  {app_data.get('ProductId', '')}"
-        ctk.CTkLabel(self.container, text=info, font=("Consolas", 10), text_color=Theme.TEXT_MUTED, anchor="w").grid(row=1, column=1, sticky="nw", padx=5, pady=(0, 10))
+        ctk.CTkLabel(self.container, text=info, font=("Consolas", 10), text_color=Theme.TEXT_MUTED, anchor="w", justify="left", wraplength=200).grid(row=1, column=1, sticky="nw", padx=5, pady=(0, 10))
         
         btn_frame = ctk.CTkFrame(self.container, fg_color="transparent")
         btn_frame.grid(row=0, column=2, rowspan=2, padx=10)
         
         ctk.CTkButton(btn_frame, text="Get Files", width=80, height=30, font=("Segoe UI", 12), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=lambda: on_fetch(app_data)).pack(side="left", padx=3)
-        ctk.CTkButton(btn_frame, text="Notes", width=58, height=30, font=("Segoe UI", 11), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=lambda: on_release_notes(app_data)).pack(side="left", padx=3)
-        ctk.CTkCheckBox(btn_frame, text="", variable=self.selected, width=24, command=lambda: on_select(app_data, self.selected.get()), fg_color=Theme.PRIMARY).pack(side="left", padx=5)
+        ctk.CTkButton(btn_frame, text="Notes", width=58, height=30, font=("Segoe UI", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=lambda: on_release_notes(app_data)).pack(side="left", padx=3)
+        ctk.CTkCheckBox(btn_frame, text="Select", variable=self.selected, width=58, font=("Segoe UI", 10), command=lambda: on_select(app_data, self.selected.get()), fg_color=Theme.PRIMARY).pack(side="left", padx=5)
         
         self.container.bind("<Enter>", lambda e: self.container.configure(fg_color=Theme.BG_CARD_HOVER))
         self.container.bind("<Leave>", lambda e: self.container.configure(fg_color=Theme.BG_CARD))
@@ -2865,7 +2868,7 @@ class PackageRow(ctk.CTkFrame):
         
         self.grid_columnconfigure(1, weight=1)
         
-        self.chk = ctk.CTkCheckBox(self, text="", variable=self.selected, width=24, command=lambda: on_toggle(pkg_data, self.selected.get()), fg_color=Theme.PRIMARY)
+        self.chk = ctk.CTkCheckBox(self, text="Select", variable=self.selected, width=58, font=("Segoe UI", 10), command=lambda: on_toggle(pkg_data, self.selected.get()), fg_color=Theme.PRIMARY)
         self.chk.grid(row=0, column=0, padx=(12, 8), pady=10)
         
         info_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -2873,7 +2876,7 @@ class PackageRow(ctk.CTkFrame):
         info_frame.grid_columnconfigure(0, weight=1)
         
         name_color = Theme.ENCRYPTED_COLOR if pkg_data.get('IsEncrypted') else Theme.TEXT_PRIMARY
-        ctk.CTkLabel(info_frame, text=pkg_data['FileName'], font=("Consolas", 11), text_color=name_color, anchor="w", wraplength=500).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(info_frame, text=pkg_data['FileName'], font=("Consolas", 11), text_color=name_color, anchor="w", wraplength=220, justify="left").grid(row=0, column=0, sticky="w")
         
         tags_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
         tags_frame.grid(row=1, column=0, sticky="w", pady=(4, 0))
@@ -2908,7 +2911,7 @@ class PackageRow(ctk.CTkFrame):
 
 class QueueItem(ctk.CTkFrame):
     def __init__(self, master, pkg_info):
-        super().__init__(master, fg_color=Theme.BG_CARD, corner_radius=8)
+        super().__init__(master, fg_color=Theme.BG_ELEVATED, corner_radius=5, border_width=1, border_color=Theme.BORDER_SUBTLE)
         
         self.pkg_info = pkg_info
         self.grid_columnconfigure(0, weight=1)
@@ -3007,67 +3010,46 @@ class MSStoreHelperApp(ctk.CTk):
         return not self.arch_override_var.get().startswith("Auto")
     
     def _build_ui(self):
-        # HEADER
-        self.header = ctk.CTkFrame(self, fg_color=Theme.BG_CARD, height=70, corner_radius=0)
-        self.header.pack(fill="x", side="top")
-        self.header.pack_propagate(False)
-        
-        title_frame = ctk.CTkFrame(self.header, fg_color="transparent")
-        title_frame.pack(side="left", padx=20, pady=15)
-        
-        ctk.CTkLabel(title_frame, text="📦", font=("Segoe UI Emoji", 28)).pack(side="left", padx=(0, 10))
-        ctk.CTkLabel(title_frame, text=APP_NAME, font=("Segoe UI Semibold", 22), text_color=Theme.TEXT_PRIMARY).pack(side="left")
-        ctk.CTkLabel(title_frame, text=f"v{APP_VERSION}", font=("Segoe UI", 12), text_color=Theme.TEXT_MUTED).pack(side="left", padx=(10, 0), pady=(8, 0))
-        
-        info_frame = ctk.CTkFrame(self.header, fg_color="transparent")
-        info_frame.pack(side="right", padx=20)
-        
-        admin_text = "✅ Admin" if IS_ADMIN else "⚠️ Not Admin"
-        admin_color = Theme.SUCCESS if IS_ADMIN else Theme.WARNING
-        ctk.CTkLabel(info_frame, text=admin_text, font=("Segoe UI", 12), text_color=admin_color).pack(side="right", padx=15)
-        ctk.CTkLabel(info_frame, text=f"System: {SYSTEM_ARCH}", font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY).pack(side="right", padx=15)
-        
-        ctk.CTkButton(info_frame, text="❓ Help", width=80, height=32, fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._show_help).pack(side="right", padx=5)
-        
-        theme_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
-        theme_frame.pack(side="right", padx=(5, 10))
-        ctk.CTkLabel(theme_frame, text="Theme", font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY).pack(side="left", padx=(0, 6))
-        ctk.CTkOptionMenu(
-            theme_frame,
-            values=THEME_MODE_VALUES,
-            variable=self.theme_mode_var,
-            width=90,
-            height=32,
-            font=("Segoe UI", 12),
-            fg_color=Theme.BG_INPUT,
-            button_color=Theme.PRIMARY,
-            button_hover_color=Theme.PRIMARY_HOVER,
-            command=self._change_theme_mode,
-        ).pack(side="left")
-
-        # LOG PANEL (at bottom - pack BEFORE main so it claims bottom space)
+        # ACTIVITY PANEL (packed first so it consistently owns the bottom edge)
         self.log_panel = ctk.CTkFrame(self, fg_color=Theme.BG_CARD, corner_radius=0)
         self._build_log_panel()
         
-        # MAIN (fills remaining space)
-        self.main = ctk.CTkFrame(self, fg_color="transparent")
-        self.main.pack(fill="both", expand=True, padx=15, pady=15)
-        self.main.grid_columnconfigure(1, weight=1)
+        # CONTINUOUS THREE-ZONE WORKSPACE
+        self.main = ctk.CTkFrame(self, fg_color=Theme.BG_DARK, corner_radius=0)
+        self.main.pack(fill="both", expand=True)
+        self.main.grid_columnconfigure(0, minsize=242)
+        self.main.grid_columnconfigure(1, weight=1, minsize=0)
+        self.main.grid_columnconfigure(2, minsize=324)
         self.main.grid_rowconfigure(0, weight=1)
         
-        # SIDEBAR
-        self.sidebar = ctk.CTkFrame(self.main, fg_color=Theme.BG_CARD, width=280, corner_radius=12)
-        self.sidebar.grid(row=0, column=0, sticky="ns", padx=(0, 10))
-        self.sidebar.grid_propagate(False)
+        # NAVIGATION RAIL
+        self.sidebar = ctk.CTkFrame(
+            self.main,
+            fg_color=Theme.BG_SIDEBAR,
+            width=242,
+            corner_radius=0,
+            border_width=1,
+            border_color=Theme.BORDER_SUBTLE,
+        )
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
+        self.sidebar.pack_propagate(False)
         self._build_sidebar()
-        
-        # CONTENT
-        self.content = ctk.CTkFrame(self.main, fg_color="transparent")
+
+        # CENTRAL WORKSPACE
+        self.content = ctk.CTkFrame(self.main, fg_color=Theme.BG_DARK, corner_radius=0)
         self.content.grid(row=0, column=1, sticky="nsew")
-        
-        # QUEUE PANEL
-        self.right_panel = ctk.CTkFrame(self.main, fg_color=Theme.BG_CARD, width=300, corner_radius=12)
-        self.right_panel.grid(row=0, column=2, sticky="ns", padx=(10, 0))
+        self.content.pack_propagate(False)
+
+        # QUEUE INSPECTOR
+        self.right_panel = ctk.CTkFrame(
+            self.main,
+            fg_color=Theme.BG_SIDEBAR,
+            width=324,
+            corner_radius=0,
+            border_width=1,
+            border_color=Theme.BORDER_SUBTLE,
+        )
+        self.right_panel.grid(row=0, column=2, sticky="nsew")
         self.right_panel.grid_propagate(False)
         self._build_queue_panel()
 
@@ -3078,6 +3060,7 @@ class MSStoreHelperApp(ctk.CTk):
             height=28,
             font=("Segoe UI", 10),
             fg_color="transparent",
+            text_color=Theme.TEXT_SECONDARY,
             border_width=1,
             border_color=Theme.BORDER,
             hover_color=Theme.BG_CARD_HOVER,
@@ -3086,41 +3069,157 @@ class MSStoreHelperApp(ctk.CTk):
         self.store_query_button.pack(fill="x", pady=(6, 0))
     
     def _build_sidebar(self):
-        # SEARCH
-        search_section = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        search_section.pack(fill="x", padx=15, pady=(16, 8))
-        
-        ctk.CTkLabel(search_section, text="🔍 Find Apps", font=("Segoe UI Semibold", 16), anchor="w").pack(fill="x")
-        ctk.CTkLabel(search_section, text="Search by name to find any app", font=("Segoe UI", 11), text_color=Theme.TEXT_MUTED, anchor="w").pack(fill="x", pady=(2, 8))
-        
-        self.search_entry = ctk.CTkEntry(search_section, placeholder_text="e.g. Spotify, WhatsApp, VLC...", height=40, font=("Segoe UI", 13), fg_color=Theme.BG_INPUT, border_color=Theme.BORDER)
-        self.search_entry.pack(fill="x", pady=(0, 8))
-        self.search_entry.bind("<Return>", lambda e: self._do_search())
-        
-        ctk.CTkButton(search_section, text="🔍 Search Store", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._do_search).pack(fill="x")
+        brand = ctk.CTkFrame(self.sidebar, fg_color="transparent", height=72, corner_radius=0)
+        brand.pack(fill="x")
+        brand.pack_propagate(False)
+        ctk.CTkLabel(
+            brand,
+            text="▣",
+            width=30,
+            font=("Segoe UI Symbol", 24),
+            text_color=Theme.PRIMARY,
+        ).pack(side="left", padx=(16, 8))
+        brand_text = ctk.CTkFrame(brand, fg_color="transparent")
+        brand_text.pack(side="left", fill="y", pady=(16, 10))
+        ctk.CTkLabel(
+            brand_text,
+            text=APP_NAME,
+            font=("Segoe UI Semibold", 16),
+            text_color=Theme.TEXT_PRIMARY,
+            anchor="w",
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            brand_text,
+            text=f"Store package workspace · v{APP_VERSION}",
+            font=("Segoe UI", 9),
+            text_color=Theme.TEXT_MUTED,
+            anchor="w",
+        ).pack(fill="x")
 
+        footer = ctk.CTkFrame(self.sidebar, fg_color="transparent", corner_radius=0)
+        footer.pack(fill="x", side="bottom", padx=12, pady=12)
+        theme_row = ctk.CTkFrame(footer, fg_color="transparent")
+        theme_row.pack(fill="x")
+        ctk.CTkOptionMenu(
+            theme_row,
+            values=THEME_MODE_VALUES,
+            variable=self.theme_mode_var,
+            width=150,
+            height=32,
+            font=("Segoe UI", 11),
+            fg_color=Theme.BG_INPUT,
+            text_color=Theme.TEXT_PRIMARY,
+            button_color=Theme.PRIMARY,
+            button_hover_color=Theme.PRIMARY_HOVER,
+            command=self._change_theme_mode,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(
+            theme_row,
+            text="?",
+            width=34,
+            height=32,
+            font=("Segoe UI Semibold", 13),
+            fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=self._show_help,
+        ).pack(side="right")
+        admin_text = f"{'Admin' if IS_ADMIN else 'Standard'} · {SYSTEM_ARCH}"
+        ctk.CTkLabel(
+            footer,
+            text=admin_text,
+            font=("Segoe UI", 10),
+            text_color=Theme.SUCCESS if IS_ADMIN else Theme.TEXT_MUTED,
+            anchor="w",
+        ).pack(fill="x", pady=(8, 0))
+
+        nav = ctk.CTkScrollableFrame(
+            self.sidebar,
+            fg_color="transparent",
+            corner_radius=0,
+            scrollbar_button_color=Theme.BORDER,
+            scrollbar_button_hover_color=Theme.TEXT_MUTED,
+        )
+        nav.pack(fill="both", expand=True, padx=(8, 4), pady=(0, 2))
+
+        self.workspace_button = ctk.CTkButton(
+            nav,
+            text="⌂   Workspace",
+            height=36,
+            font=("Segoe UI Semibold", 12),
+            fg_color=Theme.BG_CARD_HOVER,
+            text_color=Theme.PRIMARY_OUTLINE_TEXT,
+            hover_color=Theme.BG_CARD_HOVER,
+            anchor="w",
+            command=self._show_welcome,
+        )
+        self.workspace_button.pack(fill="x", padx=4, pady=(0, 14))
+
+        search_section = ctk.CTkFrame(nav, fg_color="transparent")
+        search_section.pack(fill="x", padx=4, pady=(0, 12))
+        ctk.CTkLabel(
+            search_section,
+            text="FIND APPS",
+            font=("Segoe UI Semibold", 10),
+            text_color=Theme.TEXT_MUTED,
+            anchor="w",
+        ).pack(fill="x", pady=(0, 6))
+        self.search_entry = ctk.CTkEntry(
+            search_section,
+            placeholder_text="Search Microsoft Store",
+            height=36,
+            font=("Segoe UI", 12),
+            fg_color=Theme.BG_INPUT,
+            border_color=Theme.BORDER,
+        )
+        self.search_entry.pack(fill="x", pady=(0, 6))
+        self.search_entry.bind("<Return>", lambda e: self._do_search())
+        ctk.CTkButton(
+            search_section,
+            text="Search Store",
+            height=34,
+            font=("Segoe UI Semibold", 12),
+            fg_color=Theme.PRIMARY,
+            hover_color=Theme.PRIMARY_HOVER,
+            command=self._do_search,
+        ).pack(fill="x")
         self.search_history_frame = ctk.CTkFrame(search_section, fg_color="transparent", height=1)
         self._render_search_history()
         self._build_store_query_controls(search_section)
-        
-        ctk.CTkFrame(self.sidebar, fg_color=Theme.BORDER, height=1).pack(fill="x", padx=15, pady=12)
-        
-        # QUICK FIX
-        fix_section = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        fix_section.pack(fill="x", padx=15, pady=(0, 8))
-        
-        ctk.CTkLabel(fix_section, text="⚡ Quick Actions", font=("Segoe UI Semibold", 16), anchor="w").pack(fill="x")
-        ctk.CTkLabel(fix_section, text="One-click solutions for common needs", font=("Segoe UI", 11), text_color=Theme.TEXT_MUTED, anchor="w").pack(fill="x", pady=(2, 8))
+
+        ctk.CTkFrame(nav, fg_color=Theme.BORDER_SUBTLE, height=1).pack(fill="x", padx=4, pady=(0, 12))
+
+        fix_section = ctk.CTkFrame(nav, fg_color="transparent")
+        fix_section.pack(fill="x", padx=4, pady=(0, 12))
+        ctk.CTkLabel(
+            fix_section,
+            text="QUICK ACTIONS",
+            font=("Segoe UI Semibold", 10),
+            text_color=Theme.TEXT_MUTED,
+            anchor="w",
+        ).pack(fill="x", pady=(0, 6))
         
         self.quickfix_var = ctk.StringVar(value=list(QUICK_FIX_PRESETS.keys())[0])
-        ctk.CTkOptionMenu(fix_section, values=list(QUICK_FIX_PRESETS.keys()), variable=self.quickfix_var, height=36, font=("Segoe UI", 12), fg_color=Theme.BG_INPUT, button_color=Theme.PRIMARY, button_hover_color=Theme.PRIMARY_HOVER, command=self._update_quickfix_desc).pack(fill="x", pady=(0, 6))
+        ctk.CTkOptionMenu(
+            fix_section,
+            values=list(QUICK_FIX_PRESETS.keys()),
+            variable=self.quickfix_var,
+            height=34,
+            font=("Segoe UI", 11),
+            fg_color=Theme.BG_INPUT,
+            text_color=Theme.TEXT_PRIMARY,
+            button_color=Theme.PRIMARY,
+            button_hover_color=Theme.PRIMARY_HOVER,
+            command=self._update_quickfix_desc,
+        ).pack(fill="x", pady=(0, 6))
         
-        self.quickfix_desc = ctk.CTkLabel(fix_section, text=QUICK_FIX_PRESETS[self.quickfix_var.get()]["description"], font=("Segoe UI", 11), text_color=Theme.TEXT_SECONDARY, wraplength=240, justify="left", anchor="w")
+        self.quickfix_desc = ctk.CTkLabel(fix_section, text=QUICK_FIX_PRESETS[self.quickfix_var.get()]["description"], font=("Segoe UI", 10), text_color=Theme.TEXT_SECONDARY, wraplength=200, justify="left", anchor="w")
         self.quickfix_desc.pack(fill="x", pady=(0, 8))
-        
-        ctk.CTkButton(fix_section, text="⚡ Apply Quick Fix", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._apply_quickfix).pack(fill="x", pady=(0, 6))
-        ctk.CTkButton(fix_section, text="🔎 Scan LTSC Gaps", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._scan_ltsc_gaps).pack(fill="x", pady=(0, 6))
-        ctk.CTkButton(fix_section, text="🎮 Queue Xbox Core", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._queue_xbox_core).pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(fix_section, text="Apply Quick Fix", height=34, font=("Segoe UI Semibold", 12), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._apply_quickfix).pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(fix_section, text="Scan LTSC Gaps", height=32, font=("Segoe UI", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._scan_ltsc_gaps).pack(fill="x", pady=(0, 5))
+        ctk.CTkButton(fix_section, text="Queue Xbox Core", height=32, font=("Segoe UI", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._queue_xbox_core).pack(fill="x", pady=(0, 6))
 
         updates_row = ctk.CTkFrame(fix_section, fg_color="transparent")
         updates_row.pack(fill="x")
@@ -3140,66 +3239,95 @@ class MSStoreHelperApp(ctk.CTk):
             height=30,
             font=("Segoe UI", 12),
             fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
             border_width=1,
             border_color=Theme.BORDER,
             hover_color=Theme.BG_CARD_HOVER,
             command=self._run_keep_updated_scan,
         ).pack(side="right")
 
-        ctk.CTkFrame(self.sidebar, fg_color=Theme.BORDER, height=1).pack(fill="x", padx=15, pady=10)
+        ctk.CTkFrame(nav, fg_color=Theme.BORDER_SUBTLE, height=1).pack(fill="x", padx=4, pady=(0, 12))
 
-        self.pinned_section = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        ctk.CTkLabel(self.pinned_section, text="⭐ Pinned Apps", font=("Segoe UI Semibold", 15), anchor="w").pack(fill="x")
+        self.pinned_section = ctk.CTkFrame(nav, fg_color="transparent")
+        ctk.CTkLabel(self.pinned_section, text="PINNED APPS", font=("Segoe UI Semibold", 10), text_color=Theme.TEXT_MUTED, anchor="w").pack(fill="x")
         self.pinned_list_frame = ctk.CTkFrame(self.pinned_section, fg_color="transparent", height=1)
         self.pinned_list_frame.pack(fill="x", pady=(6, 0))
         self._render_pinned_favorites()
         
-        ctk.CTkFrame(self.sidebar, fg_color=Theme.BORDER, height=1).pack(fill="x", padx=15, pady=15)
-        
-        # CATEGORIES
-        cat_section = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        cat_section.pack(fill="both", expand=True, padx=15)
-        
-        ctk.CTkLabel(cat_section, text="📂 Browse Categories", font=("Segoe UI Semibold", 16), anchor="w").pack(fill="x")
-        
-        cat_scroll = ctk.CTkScrollableFrame(cat_section, fg_color="transparent")
-        cat_scroll.pack(fill="both", expand=True, pady=(5, 0))
-        
+        cat_section = ctk.CTkFrame(nav, fg_color="transparent")
+        cat_section.pack(fill="x", padx=4, pady=(0, 12))
+        ctk.CTkLabel(cat_section, text="BROWSE", font=("Segoe UI Semibold", 10), text_color=Theme.TEXT_MUTED, anchor="w").pack(fill="x", pady=(0, 5))
         for cat_name in APP_CATALOG.keys():
-            ctk.CTkButton(cat_scroll, text=cat_name, height=36, font=("Segoe UI", 12), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, hover_color=Theme.BG_CARD_HOVER, anchor="w", command=lambda c=cat_name: self._show_category(c)).pack(fill="x", pady=2)
-        
-        # REPAIR
-        repair_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        repair_frame.pack(fill="x", padx=15, pady=15)
-        
-        ctk.CTkButton(repair_frame, text="🔧 Repair Store", height=40, font=("Segoe UI Semibold", 13), fg_color=Theme.DANGER, hover_color=Theme.DANGER_HOVER, command=self._run_repair).pack(fill="x", pady=(0, 6))
-        ctk.CTkButton(repair_frame, text="👥 Provision Store", height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._run_provisioning_repair).pack(fill="x", pady=(0, 6))
-        ctk.CTkButton(repair_frame, text="🔐 Reset Licensing", height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._run_licensing_reset).pack(fill="x", pady=(0, 6))
-        ctk.CTkButton(repair_frame, text="🧹 Rebuild Cache", height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._run_cache_rebuild).pack(fill="x")
-        ctk.CTkLabel(repair_frame, text="Fix connectivity and new-profile Store registration", font=("Segoe UI", 10), text_color=Theme.TEXT_MUTED, wraplength=220).pack(pady=(4, 0))
+            ctk.CTkButton(cat_section, text=cat_name, height=32, font=("Segoe UI", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, hover_color=Theme.BG_CARD_HOVER, anchor="w", command=lambda c=cat_name: self._show_category(c)).pack(fill="x", pady=1)
+
+        repair_frame = ctk.CTkFrame(nav, fg_color="transparent")
+        repair_frame.pack(fill="x", padx=4, pady=(0, 8))
+        ctk.CTkLabel(repair_frame, text="ADMIN TOOLS", font=("Segoe UI Semibold", 10), text_color=Theme.TEXT_MUTED, anchor="w").pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(repair_frame, text="Repair Store", height=34, font=("Segoe UI Semibold", 11), fg_color=Theme.DANGER, hover_color=Theme.DANGER_HOVER, command=self._run_repair).pack(fill="x", pady=(0, 5))
+        ctk.CTkButton(repair_frame, text="Provision Store", height=32, font=("Segoe UI", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._run_provisioning_repair).pack(fill="x", pady=(0, 5))
+        ctk.CTkButton(repair_frame, text="Reset Licensing", height=32, font=("Segoe UI", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._run_licensing_reset).pack(fill="x", pady=(0, 5))
+        ctk.CTkButton(repair_frame, text="Rebuild Cache", height=32, font=("Segoe UI", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._run_cache_rebuild).pack(fill="x")
     
     def _build_queue_panel(self):
-        header_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
-        header_frame.pack(fill="x", padx=15, pady=(20, 10))
-        
-        ctk.CTkLabel(header_frame, text="📥 Download Queue", font=("Segoe UI Semibold", 16)).pack(side="left")
-        self.queue_count = ctk.CTkLabel(header_frame, text="0 items", font=("Segoe UI", 12), text_color=Theme.TEXT_MUTED)
-        self.queue_count.pack(side="right")
-        
-        self.queue_scroll = ctk.CTkScrollableFrame(self.right_panel, fg_color=Theme.BG_INPUT, corner_radius=8, height=130)
-        self.queue_scroll.pack(fill="x", padx=15, pady=(0, 8))
-        
-        self.queue_empty = ctk.CTkLabel(self.queue_scroll, text="📭\n\nNo files in queue\n\nSearch for apps or browse\ncategories to get started", font=("Segoe UI", 12), text_color=Theme.TEXT_MUTED, justify="center")
-        self.queue_empty.pack(expand=True, pady=25)
-        
-        btn_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=15, pady=(0, 8))
-        
-        ctk.CTkButton(btn_frame, text="Clear", width=70, height=32, font=("Segoe UI", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._clear_queue).pack(side="left")
-        ctk.CTkButton(btn_frame, text="Diagnostics", width=110, height=32, font=("Segoe UI", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_diagnostics_bundle).pack(side="right")
+        self.right_panel.grid_rowconfigure(1, weight=1)
+        self.right_panel.grid_columnconfigure(0, weight=1)
 
-        cache_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
-        cache_frame.pack(fill="x", padx=15, pady=(0, 8))
+        header_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent", height=70)
+        header_frame.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+        header_frame.grid_propagate(False)
+        title_group = ctk.CTkFrame(header_frame, fg_color="transparent")
+        title_group.pack(side="left", fill="y")
+        ctk.CTkLabel(title_group, text="Download queue", font=("Segoe UI Semibold", 17), anchor="w").pack(fill="x", pady=(2, 0))
+        ctk.CTkLabel(title_group, text="Packages staged for this run", font=("Segoe UI", 10), text_color=Theme.TEXT_MUTED, anchor="w").pack(fill="x", pady=(2, 0))
+        self.queue_count = ctk.CTkLabel(header_frame, text="0 items", font=("Segoe UI", 12), text_color=Theme.TEXT_MUTED)
+        self.queue_count.pack(side="right", pady=(6, 0))
+
+        self.queue_scroll = ctk.CTkScrollableFrame(
+            self.right_panel,
+            fg_color=Theme.BG_INPUT,
+            corner_radius=7,
+            border_width=1,
+            border_color=Theme.BORDER_SUBTLE,
+            height=100,
+        )
+        self.queue_scroll.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 10))
+        self.queue_empty = ctk.CTkLabel(
+            self.queue_scroll,
+            text="○\n\nNo packages queued\n\nFind an app or browse a category\nto stage installation files.",
+            font=("Segoe UI", 11),
+            text_color=Theme.TEXT_MUTED,
+            justify="center",
+        )
+        self.queue_empty.pack(expand=True, pady=32)
+
+        controls = ctk.CTkFrame(self.right_panel, fg_color="transparent")
+        controls.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 14))
+
+        output_header = ctk.CTkFrame(controls, fg_color="transparent")
+        output_header.pack(fill="x")
+        ctk.CTkLabel(output_header, text="OUTPUT", font=("Segoe UI Semibold", 9), text_color=Theme.TEXT_MUTED, anchor="w").pack(side="left")
+        ctk.CTkButton(
+            output_header,
+            text="Change",
+            width=56,
+            height=24,
+            font=("Segoe UI", 10),
+            fg_color="transparent",
+            text_color=Theme.PRIMARY_OUTLINE_TEXT,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=self._choose_output_folder,
+        ).pack(side="right")
+        self.output_path_label = ctk.CTkLabel(
+            controls,
+            text=self._format_output_path(),
+            font=("Consolas", 9),
+            text_color=Theme.TEXT_SECONDARY,
+            anchor="w",
+        )
+        self.output_path_label.pack(fill="x", pady=(1, 7))
+
+        cache_frame = ctk.CTkFrame(controls, fg_color="transparent")
+        cache_frame.pack(fill="x", pady=(0, 6))
 
         ctk.CTkCheckBox(
             cache_frame,
@@ -3217,6 +3345,7 @@ class MSStoreHelperApp(ctk.CTk):
             height=30,
             font=("Segoe UI", 12),
             fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
             border_width=1,
             border_color=Theme.BORDER,
             hover_color=Theme.BG_CARD_HOVER,
@@ -3224,41 +3353,62 @@ class MSStoreHelperApp(ctk.CTk):
         ).pack(side="right")
 
         self.shared_cache_label = ctk.CTkLabel(
-            self.right_panel,
+            controls,
             text=self._format_shared_cache_path(),
             font=("Consolas", 10),
             text_color=Theme.TEXT_MUTED,
             anchor="w",
         )
-        self.shared_cache_label.pack(fill="x", padx=15, pady=(0, 8))
+        self.shared_cache_label.pack(fill="x", pady=(0, 7))
         
-        progress_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
-        progress_frame.pack(fill="x", padx=15, pady=(0, 8))
+        progress_frame = ctk.CTkFrame(controls, fg_color="transparent")
+        progress_frame.pack(fill="x", pady=(0, 8))
         
-        self.progress_label = ctk.CTkLabel(progress_frame, text="Ready", font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY)
+        self.progress_label = ctk.CTkLabel(progress_frame, text="Ready", font=("Segoe UI", 11), text_color=Theme.TEXT_SECONDARY, anchor="w")
         self.progress_label.pack(fill="x")
         
-        self.progress_bar = ctk.CTkProgressBar(progress_frame, height=8, corner_radius=4, fg_color=Theme.BG_INPUT, progress_color=Theme.PRIMARY)
+        self.progress_bar = ctk.CTkProgressBar(progress_frame, height=6, corner_radius=3, fg_color=Theme.BG_INPUT, progress_color=Theme.PRIMARY)
         self.progress_bar.pack(fill="x", pady=(4, 0))
         self.progress_bar.set(0)
         
-        action_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
-        action_frame.pack(fill="x", padx=15, pady=(0, 10))
-        
-        ctk.CTkButton(action_frame, text="⬇️ Download All", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._start_download).pack(fill="x", pady=(0, 5))
-        ctk.CTkButton(action_frame, text="🧾 Export DISM Script", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_dism_script).pack(fill="x", pady=(0, 5))
-        ctk.CTkButton(action_frame, text="📄 Export AppInstaller", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_appinstaller_manifest).pack(fill="x", pady=(0, 5))
-        ctk.CTkButton(action_frame, text="📦 Export IntuneWin", height=34, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_intunewin_package).pack(fill="x", pady=(0, 5))
+        action_frame = ctk.CTkFrame(controls, fg_color="transparent")
+        action_frame.pack(fill="x")
+        ctk.CTkButton(action_frame, text="Download all", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._start_download).pack(fill="x", pady=(0, 6))
+
+        export_grid = ctk.CTkFrame(action_frame, fg_color="transparent")
+        export_grid.pack(fill="x", pady=(0, 6))
+        export_grid.grid_columnconfigure((0, 1), weight=1)
+        export_actions = [
+            ("DISM script", self._export_dism_script),
+            ("AppInstaller", self._export_appinstaller_manifest),
+            ("IntuneWin", self._export_intunewin_package),
+            ("Diagnostics", self._export_diagnostics_bundle),
+        ]
+        for index, (label, command) in enumerate(export_actions):
+            row, column = divmod(index, 2)
+            ctk.CTkButton(
+                export_grid,
+                text=label,
+                height=29,
+                font=("Segoe UI", 10),
+                fg_color="transparent",
+                text_color=Theme.TEXT_PRIMARY,
+                border_width=1,
+                border_color=Theme.BORDER,
+                hover_color=Theme.BG_CARD_HOVER,
+                command=command,
+            ).grid(row=row, column=column, sticky="ew", padx=(0, 3) if column == 0 else (3, 0), pady=(0, 5) if row == 0 else 0)
+
         install_row = ctk.CTkFrame(action_frame, fg_color="transparent")
         install_row.pack(fill="x")
-        ctk.CTkButton(install_row, text="📦 Install", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._start_install).pack(side="left", fill="x", expand=True, padx=(0, 3))
-        ctk.CTkButton(install_row, text="↩ Rollback", height=38, font=("Segoe UI Semibold", 13), fg_color="transparent", border_width=1, border_color=Theme.WARNING, hover_color=Theme.BG_CARD_HOVER, command=self._start_rollback).pack(side="left", fill="x", expand=True, padx=3)
-        ctk.CTkButton(install_row, text="Diff", height=38, font=("Segoe UI Semibold", 13), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._show_package_diff).pack(side="left", fill="x", expand=True, padx=(3, 0))
+        ctk.CTkButton(install_row, text="Install", width=76, height=34, font=("Segoe UI Semibold", 11), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._start_install).pack(side="left", fill="x", expand=True, padx=(0, 3))
+        ctk.CTkButton(install_row, text="Rollback", width=76, height=34, font=("Segoe UI Semibold", 11), fg_color="transparent", text_color=Theme.WARNING, border_width=1, border_color=Theme.WARNING, hover_color=Theme.BG_CARD_HOVER, command=self._start_rollback).pack(side="left", fill="x", expand=True, padx=3)
+        ctk.CTkButton(install_row, text="Diff", width=64, height=34, font=("Segoe UI Semibold", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._show_package_diff).pack(side="left", fill="x", expand=True, padx=(3, 0))
     
     def _build_log_panel(self):
         """Build the collapsible log/console panel"""
         # Toggle bar (always visible)
-        self.log_toggle = ctk.CTkFrame(self.log_panel, fg_color=Theme.BG_INPUT, height=36)
+        self.log_toggle = ctk.CTkFrame(self.log_panel, fg_color=Theme.BG_INPUT, height=40, corner_radius=0)
         self.log_toggle.pack(fill="x", side="top")
         self.log_toggle.pack_propagate(False)
         
@@ -3267,9 +3417,10 @@ class MSStoreHelperApp(ctk.CTk):
         
         self.log_toggle_btn = ctk.CTkButton(
             toggle_inner,
-            text="▼ Console Output",
+            text="›  Activity",
             font=("Segoe UI Semibold", 12),
             fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
             hover_color=Theme.BG_CARD_HOVER,
             anchor="w",
             command=self._toggle_log_panel
@@ -3290,11 +3441,12 @@ class MSStoreHelperApp(ctk.CTk):
         
         ctk.CTkButton(
             log_controls,
-            text="📋 Copy",
+            text="Copy",
             width=60,
             height=26,
             font=("Segoe UI", 11),
             fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
             border_width=1,
             border_color=Theme.BORDER,
             hover_color=Theme.BG_CARD_HOVER,
@@ -3303,11 +3455,12 @@ class MSStoreHelperApp(ctk.CTk):
         
         ctk.CTkButton(
             log_controls,
-            text="🗑️ Clear",
+            text="Clear",
             width=60,
             height=26,
             font=("Segoe UI", 11),
             fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
             border_width=1,
             border_color=Theme.BORDER,
             hover_color=Theme.BG_CARD_HOVER,
@@ -3331,7 +3484,7 @@ class MSStoreHelperApp(ctk.CTk):
         # Pack the log panel at bottom BEFORE main content
         self.log_panel.pack(fill="x", side="bottom")
         self.log_expanded = False
-        self.log_toggle_btn.configure(text="▲ Console Output")
+        self.log_toggle_btn.configure(text="›  Activity")
         
         # Add initial log message
         self._log("INFO", f"MSStoreHelper v{APP_VERSION} initialized")
@@ -3346,11 +3499,11 @@ class MSStoreHelperApp(ctk.CTk):
         """Toggle log panel expanded/collapsed"""
         if self.log_expanded:
             self.log_content.pack_forget()
-            self.log_toggle_btn.configure(text="▲ Console Output")
+            self.log_toggle_btn.configure(text="›  Activity")
             self.log_expanded = False
         else:
             self.log_content.pack(fill="x", side="top")
-            self.log_toggle_btn.configure(text="▼ Console Output")
+            self.log_toggle_btn.configure(text="⌄  Activity")
             self.log_expanded = True
             # Scroll to bottom
             self.log_text.see("end")
@@ -3412,62 +3565,316 @@ class MSStoreHelperApp(ctk.CTk):
         self.package_scroll = None
         for widget in self.content.winfo_children():
             widget.destroy()
-    
+
+    def _set_workspace_navigation(self, active):
+        if not hasattr(self, "workspace_button"):
+            return
+        self.workspace_button.configure(
+            fg_color=Theme.BG_CARD_HOVER if active else "transparent",
+            text_color=Theme.PRIMARY_OUTLINE_TEXT if active else Theme.TEXT_PRIMARY,
+        )
+
+    def _workspace_source_status(self):
+        if self.source_health:
+            available = sum(1 for status in self.source_health if status.get("Available"))
+            total = len(self.source_health)
+            if available == total:
+                return f"{available}/{total} available", Theme.SUCCESS
+            if available:
+                return f"{available}/{total} available", Theme.WARNING
+            return "Unavailable", Theme.DANGER
+        if os.environ.get("MSSTOREHELPER_SKIP_SOURCE_HEALTH") == "1":
+            return "Not checked", Theme.TEXT_MUTED
+        return "Checking", Theme.INFO
+
+    def _refresh_workspace_source_status(self):
+        label = getattr(self, "workspace_source_value", None)
+        if label is None or not label.winfo_exists():
+            return
+        text, color = self._workspace_source_status()
+        label.configure(text=text, text_color=color)
+
+    @staticmethod
+    def _status_cell(parent, label, value, color):
+        cell = ctk.CTkFrame(parent, fg_color="transparent")
+        ctk.CTkLabel(
+            cell,
+            text=label.upper(),
+            font=("Segoe UI Semibold", 9),
+            text_color=Theme.TEXT_MUTED,
+            anchor="w",
+        ).pack(fill="x")
+        value_label = ctk.CTkLabel(
+            cell,
+            text=value,
+            font=("Segoe UI Semibold", 11),
+            text_color=color,
+            anchor="w",
+        )
+        value_label.pack(fill="x", pady=(2, 0))
+        return cell, value_label
+
+    def _do_workspace_search(self):
+        query = self.workspace_search_entry.get().strip()
+        if not query:
+            self.workspace_search_entry.focus()
+            return
+        self.search_entry.delete(0, "end")
+        self.search_entry.insert(0, query)
+        self._do_search()
+
     def _show_welcome(self):
         self._clear_content()
         self.current_view = "welcome"
-        
-        center = ctk.CTkFrame(self.content, fg_color="transparent")
-        center.place(relx=0.5, rely=0.5, anchor="center")
-        
-        card = ModernCard(center)
-        card.pack(padx=20, pady=30)
-        
-        inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(padx=32, pady=32)
-        
-        ctk.CTkLabel(inner, text="👋", font=("Segoe UI Emoji", 42)).pack(pady=(0, 8))
-        ctk.CTkLabel(inner, text="Welcome to MSStoreHelper", font=("Segoe UI Semibold", 22), wraplength=520).pack()
-        ctk.CTkLabel(inner, text="Download and install Microsoft Store apps\nwithout needing access to the Store", font=("Segoe UI", 13), text_color=Theme.TEXT_SECONDARY, justify="center", wraplength=520).pack(pady=(10, 22))
-        
-        options = ctk.CTkFrame(inner, fg_color="transparent")
-        options.pack()
-        
-        ctk.CTkButton(options, text="🔍 Search", width=160, height=42, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=lambda: self.search_entry.focus()).pack(side="left", padx=8)
-        ctk.CTkButton(options, text="📂 Categories", width=160, height=42, font=("Segoe UI Semibold", 13), fg_color="transparent", border_width=2, border_color=Theme.PRIMARY, text_color=Theme.PRIMARY_OUTLINE_TEXT, hover_color=Theme.BG_CARD_HOVER, command=lambda: self._show_category("🛠️ Essential Repairs")).pack(side="left", padx=8)
-        
-        tips = ctk.CTkFrame(inner, fg_color=Theme.BG_INPUT, corner_radius=8)
-        tips.pack(fill="x", pady=(30, 0))
-        
-        tip_inner = ctk.CTkFrame(tips, fg_color="transparent")
-        tip_inner.pack(padx=18, pady=14)
-        
-        ctk.CTkLabel(tip_inner, text="💡 Tips", font=("Segoe UI Semibold", 13), anchor="w").pack(fill="x")
-        ctk.CTkLabel(tip_inner, text="• Use 'Smart Select' to automatically pick the best files\n• Bundles (.msixbundle) work on all architectures\n• Run as Administrator for installation to work\n• Use 'Repair Store' if the Store shows connectivity errors", font=("Segoe UI", 11), text_color=Theme.TEXT_SECONDARY, justify="left", anchor="w", wraplength=500).pack(fill="x", pady=(5, 0))
+        self._set_workspace_navigation(True)
+
+        workspace = ctk.CTkScrollableFrame(
+            self.content,
+            fg_color="transparent",
+            corner_radius=0,
+            scrollbar_button_color=Theme.BORDER,
+            scrollbar_button_hover_color=Theme.TEXT_MUTED,
+        )
+        workspace.pack(fill="both", expand=True, padx=(22, 18), pady=(18, 14))
+
+        header = ctk.CTkFrame(workspace, fg_color="transparent")
+        header.pack(fill="x")
+        ctk.CTkLabel(
+            header,
+            text="Workspace",
+            font=("Segoe UI Semibold", 25),
+            text_color=Theme.TEXT_PRIMARY,
+            anchor="w",
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            header,
+            text="Find, validate, and stage Microsoft Store packages for this PC.",
+            font=("Segoe UI", 12),
+            text_color=Theme.TEXT_SECONDARY,
+            anchor="w",
+        ).pack(fill="x", pady=(3, 0))
+
+        trust = ctk.CTkFrame(
+            workspace,
+            fg_color=Theme.BG_CARD,
+            corner_radius=7,
+            border_width=1,
+            border_color=Theme.BORDER_SUBTLE,
+        )
+        trust.pack(fill="x", pady=(16, 18))
+        trust.grid_columnconfigure((0, 1, 2), weight=1)
+        source_text, source_color = self._workspace_source_status()
+        source_cell, self.workspace_source_value = self._status_cell(trust, "Sources", source_text, source_color)
+        signature_cell, _ = self._status_cell(trust, "Signature policy", "Verify on install", Theme.INFO)
+        admin_cell, _ = self._status_cell(
+            trust,
+            "Admin",
+            "Elevated" if IS_ADMIN else "Standard session",
+            Theme.SUCCESS if IS_ADMIN else Theme.WARNING,
+        )
+        source_cell.grid(row=0, column=0, sticky="ew", padx=(14, 10), pady=11)
+        signature_cell.grid(row=0, column=1, sticky="ew", padx=10, pady=11)
+        admin_cell.grid(row=0, column=2, sticky="ew", padx=(10, 14), pady=11)
+
+        search_surface = ctk.CTkFrame(workspace, fg_color="transparent")
+        search_surface.pack(fill="x")
+        ctk.CTkLabel(
+            search_surface,
+            text="FIND APPS",
+            font=("Segoe UI Semibold", 10),
+            text_color=Theme.TEXT_MUTED,
+            anchor="w",
+        ).pack(fill="x", pady=(0, 7))
+        search_row = ctk.CTkFrame(search_surface, fg_color="transparent")
+        search_row.pack(fill="x")
+        self.workspace_search_entry = ctk.CTkEntry(
+            search_row,
+            placeholder_text="Search Microsoft Store",
+            height=42,
+            font=("Segoe UI", 13),
+            fg_color=Theme.BG_INPUT,
+            border_color=Theme.BORDER,
+        )
+        self.workspace_search_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.workspace_search_entry.bind("<Return>", lambda _event: self._do_workspace_search())
+        ctk.CTkButton(
+            search_row,
+            text="Search",
+            width=104,
+            height=42,
+            font=("Segoe UI Semibold", 12),
+            fg_color=Theme.PRIMARY,
+            hover_color=Theme.PRIMARY_HOVER,
+            command=self._do_workspace_search,
+        ).pack(side="right")
+
+        history = self.user_profile.get("SearchHistory", [])[:4]
+        if history:
+            recent = ctk.CTkFrame(search_surface, fg_color="transparent")
+            recent.pack(fill="x", pady=(9, 0))
+            ctk.CTkLabel(recent, text="Recent", font=("Segoe UI", 10), text_color=Theme.TEXT_MUTED).pack(side="left", padx=(0, 6))
+            for query in history:
+                ctk.CTkButton(
+                    recent,
+                    text=query[:20],
+                    width=72,
+                    height=26,
+                    font=("Segoe UI", 10),
+                    fg_color=Theme.BG_ELEVATED,
+                    text_color=Theme.TEXT_SECONDARY,
+                    border_width=1,
+                    border_color=Theme.BORDER_SUBTLE,
+                    hover_color=Theme.BG_CARD_HOVER,
+                    command=lambda q=query: self._search_from_history(q),
+                ).pack(side="left", padx=(0, 5))
+
+        favorites = self.user_profile.get("PinnedFavorites", [])[:4]
+        favorites_header = ctk.CTkFrame(workspace, fg_color="transparent")
+        favorites_header.pack(fill="x", pady=(22, 8))
+        ctk.CTkLabel(
+            favorites_header,
+            text="Favorite apps",
+            font=("Segoe UI Semibold", 15),
+            text_color=Theme.TEXT_PRIMARY,
+            anchor="w",
+        ).pack(side="left")
+        favorite_header_actions = ctk.CTkFrame(favorites_header, fg_color="transparent")
+        favorite_header_actions.pack(side="right")
+        ctk.CTkLabel(
+            favorite_header_actions,
+            text="Pinned from search or browse",
+            font=("Segoe UI", 10),
+            text_color=Theme.TEXT_MUTED,
+        ).pack(side="left")
+        if favorites:
+            ctk.CTkButton(
+                favorite_header_actions,
+                text="Clear",
+                width=44,
+                height=24,
+                font=("Segoe UI", 10),
+                fg_color="transparent",
+                text_color=Theme.PRIMARY_OUTLINE_TEXT,
+                hover_color=Theme.BG_CARD_HOVER,
+                command=self._clear_pinned_favorites,
+            ).pack(side="left", padx=(7, 0))
+
+        favorite_surface = ctk.CTkFrame(
+            workspace,
+            fg_color=Theme.BG_CARD,
+            corner_radius=7,
+            border_width=1,
+            border_color=Theme.BORDER_SUBTLE,
+        )
+        favorite_surface.pack(fill="x")
+        if favorites:
+            for index, app in enumerate(favorites):
+                row = ctk.CTkFrame(favorite_surface, fg_color="transparent")
+                row.pack(fill="x", padx=12, pady=(9 if index == 0 else 5, 9 if index == len(favorites) - 1 else 5))
+                ctk.CTkLabel(row, text=app.get("Icon", "▣"), width=28, font=("Segoe UI Emoji", 17)).pack(side="left")
+                ctk.CTkLabel(row, text=app["Name"], font=("Segoe UI Semibold", 11), text_color=Theme.TEXT_PRIMARY, anchor="w").pack(side="left", fill="x", expand=True, padx=(6, 8))
+                ctk.CTkButton(
+                    row,
+                    text="Get files",
+                    width=76,
+                    height=28,
+                    font=("Segoe UI", 10),
+                    fg_color="transparent",
+                    text_color=Theme.PRIMARY_OUTLINE_TEXT,
+                    border_width=1,
+                    border_color=Theme.BORDER,
+                    hover_color=Theme.BG_CARD_HOVER,
+                    command=lambda a=app: self._fetch_single_app(a),
+                ).pack(side="right")
+        else:
+            ctk.CTkLabel(
+                favorite_surface,
+                text="No favorites pinned yet. Select apps in search or browse, then choose Pin Selected.",
+                font=("Segoe UI", 11),
+                text_color=Theme.TEXT_MUTED,
+                anchor="w",
+                justify="left",
+                wraplength=520,
+            ).pack(fill="x", padx=14, pady=14)
+
+        onboarding = ctk.CTkFrame(
+            workspace,
+            fg_color=Theme.BG_ELEVATED,
+            corner_radius=7,
+            border_width=1,
+            border_color=Theme.BORDER_SUBTLE,
+        )
+        onboarding.pack(fill="x", pady=(18, 2))
+        onboarding.grid_columnconfigure(0, weight=1)
+        onboarding_copy = ctk.CTkFrame(onboarding, fg_color="transparent")
+        onboarding_copy.grid(row=0, column=0, sticky="nsew", padx=(18, 10), pady=18)
+        ctk.CTkLabel(onboarding_copy, text="Start with a known workflow", font=("Segoe UI Semibold", 16), text_color=Theme.TEXT_PRIMARY, anchor="w").pack(fill="x")
+        ctk.CTkLabel(
+            onboarding_copy,
+            text="Browse the LTSC essentials catalog or scan this PC for common Store capability gaps.",
+            font=("Segoe UI", 11),
+            text_color=Theme.TEXT_SECONDARY,
+            anchor="w",
+            justify="left",
+            wraplength=500,
+        ).pack(fill="x", pady=(5, 12))
+        onboarding_actions = ctk.CTkFrame(onboarding_copy, fg_color="transparent")
+        onboarding_actions.pack(fill="x")
+        ctk.CTkButton(
+            onboarding_actions,
+            text="Browse essentials",
+            width=126,
+            height=34,
+            font=("Segoe UI Semibold", 11),
+            fg_color=Theme.PRIMARY,
+            hover_color=Theme.PRIMARY_HOVER,
+            command=lambda: self._show_category("🛠️ Essential Repairs"),
+        ).pack(side="left", padx=(0, 7))
+        ctk.CTkButton(
+            onboarding_actions,
+            text="Scan LTSC gaps",
+            width=122,
+            height=34,
+            font=("Segoe UI", 11),
+            fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=self._scan_ltsc_gaps,
+        ).pack(side="left")
+        ctk.CTkLabel(
+            onboarding,
+            text="▣",
+            width=82,
+            font=("Segoe UI Symbol", 42),
+            text_color=Theme.PRIMARY,
+        ).grid(row=0, column=1, padx=(0, 16), pady=16)
     
     def _show_category(self, category_name):
         self._clear_content()
         self.current_view = "category"
+        self._set_workspace_navigation(False)
         self.selected_apps.clear()
         
         cat_data = APP_CATALOG.get(category_name, {})
         apps = cat_data.get("apps", [])
         
         header = ctk.CTkFrame(self.content, fg_color="transparent")
-        header.pack(fill="x", padx=10, pady=(10, 5))
+        header.pack(fill="x", padx=22, pady=(20, 10))
 
         title_group = ctk.CTkFrame(header, fg_color="transparent")
-        title_group.pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(title_group, text=category_name, font=("Segoe UI Semibold", 22), anchor="w").pack(fill="x")
-        ctk.CTkLabel(title_group, text=cat_data.get("description", ""), font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY, anchor="w").pack(fill="x", pady=(2, 0))
+        title_group.pack(fill="x")
+        ctk.CTkLabel(title_group, text=category_name, font=("Segoe UI Semibold", 23), anchor="w", justify="left", wraplength=360).pack(fill="x")
+        ctk.CTkLabel(title_group, text=cat_data.get("description", ""), font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY, anchor="w", justify="left", wraplength=360).pack(fill="x", pady=(2, 0))
         actions = ctk.CTkFrame(header, fg_color="transparent")
-        actions.pack(side="right")
-        ctk.CTkButton(actions, text="Pin Selected", width=105, height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._pin_selected_apps).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(actions, text="Export WinGet", width=120, height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_winget_manifest).pack(side="left", padx=(0, 8))
+        actions.pack(fill="x", pady=(10, 0))
+        ctk.CTkButton(actions, text="Pin Selected", width=105, height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._pin_selected_apps).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(actions, text="Export WinGet", width=120, height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_winget_manifest).pack(side="left", padx=(0, 8))
         ctk.CTkButton(actions, text="Get Selected Apps", width=135, height=36, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._fetch_selected).pack(side="left")
         
         scroll = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
-        scroll.pack(fill="both", expand=True, padx=5, pady=5)
+        scroll.pack(fill="both", expand=True, padx=18, pady=(0, 14))
         
         for app in apps:
             AppTile(scroll, app, self._on_app_toggle, self._show_release_notes).pack(fill="x")
@@ -3475,31 +3882,32 @@ class MSStoreHelperApp(ctk.CTk):
     def _show_search_results(self, results, query):
         self._clear_content()
         self.current_view = "search"
+        self._set_workspace_navigation(False)
         self.selected_apps.clear()
         
         header = ctk.CTkFrame(self.content, fg_color="transparent")
-        header.pack(fill="x", padx=10, pady=(10, 5))
+        header.pack(fill="x", padx=22, pady=(20, 10))
 
         title_group = ctk.CTkFrame(header, fg_color="transparent")
-        title_group.pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(title_group, text=f'🔍 Results for "{query}"', font=("Segoe UI Semibold", 20), anchor="w").pack(fill="x")
+        title_group.pack(fill="x")
+        ctk.CTkLabel(title_group, text=f'Results for "{query}"', font=("Segoe UI Semibold", 22), anchor="w", justify="left", wraplength=360).pack(fill="x")
         ctk.CTkLabel(title_group, text=f"{len(results)} apps found", font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY, anchor="w").pack(fill="x", pady=(2, 0))
         actions = ctk.CTkFrame(header, fg_color="transparent")
-        actions.pack(side="right")
-        ctk.CTkButton(actions, text="Pin Selected", width=105, height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._pin_selected_apps).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(actions, text="Export WinGet", width=120, height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_winget_manifest).pack(side="left", padx=(0, 8))
+        actions.pack(fill="x", pady=(10, 0))
+        ctk.CTkButton(actions, text="Pin Selected", width=105, height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._pin_selected_apps).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(actions, text="Export WinGet", width=120, height=36, font=("Segoe UI Semibold", 12), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._export_winget_manifest).pack(side="left", padx=(0, 8))
         ctk.CTkButton(actions, text="Get Selected Apps", width=135, height=36, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._fetch_selected).pack(side="left")
         
         if not results:
             empty = ctk.CTkFrame(self.content, fg_color="transparent")
             empty.pack(expand=True)
-            ctk.CTkLabel(empty, text="😕", font=("Segoe UI Emoji", 48)).pack(pady=(0, 10))
+            ctk.CTkLabel(empty, text="○", font=("Segoe UI Symbol", 42), text_color=Theme.TEXT_MUTED).pack(pady=(0, 10))
             ctk.CTkLabel(empty, text="No apps found", font=("Segoe UI Semibold", 18)).pack()
-            ctk.CTkLabel(empty, text="Try a different search term", font=("Segoe UI", 13), text_color=Theme.TEXT_SECONDARY).pack(pady=(5, 0))
+            ctk.CTkLabel(empty, text="Try a broader product name or publisher.", font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY).pack(pady=(5, 0))
             return
         
         scroll = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
-        scroll.pack(fill="both", expand=True, padx=5, pady=5)
+        scroll.pack(fill="both", expand=True, padx=18, pady=(0, 14))
         
         for app in results:
             SearchResultTile(scroll, app, self._fetch_single_app, self._on_app_toggle, self._show_release_notes).pack(fill="x")
@@ -3507,43 +3915,47 @@ class MSStoreHelperApp(ctk.CTk):
     def _show_packages(self, packages, title):
         self._clear_content()
         self.current_view = "packages"
+        self._set_workspace_navigation(False)
         self.current_packages = packages
         self.selected_packages.clear()
         self.package_rows.clear()
         
         header = ctk.CTkFrame(self.content, fg_color="transparent")
-        header.pack(fill="x", padx=10, pady=(10, 5))
+        header.pack(fill="x", padx=22, pady=(20, 8))
         
-        ctk.CTkLabel(header, text=f"📦 {title}", font=("Segoe UI Semibold", 20)).pack(side="left")
+        ctk.CTkLabel(header, text=title, font=("Segoe UI Semibold", 21)).pack(side="left")
         self.selection_info = ctk.CTkLabel(header, text="0 selected", font=("Segoe UI", 12), text_color=Theme.INFO)
         self.selection_info.pack(side="right", padx=15)
         
-        toolbar = ctk.CTkFrame(self.content, fg_color=Theme.BG_CARD, corner_radius=8)
-        toolbar.pack(fill="x", padx=10, pady=(5, 10))
+        toolbar = ctk.CTkFrame(self.content, fg_color=Theme.BG_CARD, corner_radius=7, border_width=1, border_color=Theme.BORDER_SUBTLE)
+        toolbar.pack(fill="x", padx=22, pady=(5, 10))
         
         tb_inner = ctk.CTkFrame(toolbar, fg_color="transparent")
         tb_inner.pack(fill="x", padx=10, pady=8)
-        
-        ctk.CTkButton(tb_inner, text="✨ Smart Select", width=120, height=32, font=("Segoe UI", 12), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._smart_select).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(tb_inner, text="Select All", width=90, height=32, font=("Segoe UI", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._select_all).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(tb_inner, text="Clear", width=70, height=32, font=("Segoe UI", 12), fg_color="transparent", border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._select_none).pack(side="left")
-        ctk.CTkLabel(tb_inner, text="Arch", font=("Segoe UI", 12), text_color=Theme.TEXT_SECONDARY).pack(side="left", padx=(14, 6))
-        ctk.CTkOptionMenu(tb_inner, values=self.arch_options, variable=self.arch_override_var, width=120, height=32, font=("Segoe UI", 12), fg_color=Theme.BG_INPUT, button_color=Theme.PRIMARY, button_hover_color=Theme.PRIMARY_HOVER, command=self._on_arch_override_change).pack(side="left")
-        ctk.CTkButton(tb_inner, text="➕ Add to Queue", width=130, height=32, font=("Segoe UI Semibold", 12), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._add_to_queue).pack(side="right")
+        tb_inner.grid_columnconfigure(3, weight=1)
+        ctk.CTkButton(tb_inner, text="Smart Select", width=112, height=32, font=("Segoe UI", 12), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._smart_select).grid(row=0, column=0, sticky="w", padx=(0, 7))
+        ctk.CTkButton(tb_inner, text="Select All", width=84, height=32, font=("Segoe UI", 12), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._select_all).grid(row=0, column=1, sticky="w", padx=(0, 7))
+        ctk.CTkButton(tb_inner, text="Clear", width=64, height=32, font=("Segoe UI", 12), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._select_none).grid(row=0, column=2, sticky="w")
+
+        arch_frame = ctk.CTkFrame(tb_inner, fg_color="transparent")
+        arch_frame.grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ctk.CTkLabel(arch_frame, text="Target arch", font=("Segoe UI", 11), text_color=Theme.TEXT_SECONDARY).pack(side="left", padx=(0, 6))
+        ctk.CTkOptionMenu(arch_frame, values=self.arch_options, variable=self.arch_override_var, width=120, height=30, font=("Segoe UI", 11), fg_color=Theme.BG_INPUT, text_color=Theme.TEXT_PRIMARY, button_color=Theme.PRIMARY, button_hover_color=Theme.PRIMARY_HOVER, command=self._on_arch_override_change).pack(side="left")
+        ctk.CTkButton(tb_inner, text="Add to queue", width=116, height=32, font=("Segoe UI Semibold", 11), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._add_to_queue).grid(row=1, column=3, sticky="e", pady=(8, 0))
         
         col_header = ctk.CTkFrame(self.content, fg_color=Theme.BG_INPUT, corner_radius=6)
-        col_header.pack(fill="x", padx=10, pady=(0, 5))
+        col_header.pack(fill="x", padx=22, pady=(0, 5))
         
         ch_inner = ctk.CTkFrame(col_header, fg_color="transparent")
         ch_inner.pack(fill="x", padx=12, pady=8)
         ch_inner.grid_columnconfigure(1, weight=1)
         
-        ctk.CTkLabel(ch_inner, text="", width=40).grid(row=0, column=0)
+        ctk.CTkLabel(ch_inner, text="Select", font=("Segoe UI Semibold", 10), width=58).grid(row=0, column=0)
         ctk.CTkLabel(ch_inner, text="File Name", font=("Segoe UI Semibold", 11), anchor="w").grid(row=0, column=1, sticky="w")
         ctk.CTkLabel(ch_inner, text="Size", font=("Segoe UI Semibold", 11), width=80).grid(row=0, column=2, padx=(0, 10))
         
         self.package_scroll = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
-        self.package_scroll.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.package_scroll.pack(fill="both", expand=True, padx=22, pady=(0, 14))
         self._render_package_rows()
         
         self._fetch_sizes_async()
@@ -3766,6 +4178,7 @@ Fixes "needs to be online" and similar errors.
                 height=32,
                 font=("Segoe UI", 12),
                 fg_color=Theme.BG_INPUT,
+                text_color=Theme.TEXT_PRIMARY,
                 button_color=Theme.PRIMARY,
                 button_hover_color=Theme.PRIMARY_HOVER,
                 command=self._change_store_query_setting,
@@ -3778,6 +4191,7 @@ Fixes "needs to be online" and similar errors.
             height=32,
             font=("Segoe UI", 12),
             fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
             border_width=1,
             border_color=Theme.BORDER,
             hover_color=Theme.BG_CARD_HOVER,
@@ -3801,29 +4215,7 @@ Fixes "needs to be online" and similar errors.
 
         for widget in self.search_history_frame.winfo_children():
             widget.destroy()
-
-        history = self.user_profile.get("SearchHistory", [])[:4]
-        if not history:
-            self.search_history_frame.pack_forget()
-            return
-
-        if not self.search_history_frame.winfo_manager():
-            self.search_history_frame.pack(fill="x", pady=(8, 0))
-
-        ctk.CTkLabel(self.search_history_frame, text="Recent", font=("Segoe UI", 10), text_color=Theme.TEXT_MUTED, anchor="w").pack(fill="x")
-        for query in history:
-            ctk.CTkButton(
-                self.search_history_frame,
-                text=query[:32],
-                height=26,
-                font=("Segoe UI", 11),
-                fg_color="transparent",
-                border_width=1,
-                border_color=Theme.BORDER,
-                hover_color=Theme.BG_CARD_HOVER,
-                anchor="w",
-                command=lambda q=query: self._search_from_history(q),
-            ).pack(fill="x", pady=(4, 0))
+        self.search_history_frame.pack_forget()
 
     def _render_pinned_favorites(self):
         if not hasattr(self, "pinned_list_frame"):
@@ -3831,40 +4223,7 @@ Fixes "needs to be online" and similar errors.
 
         for widget in self.pinned_list_frame.winfo_children():
             widget.destroy()
-
-        favorites = self.user_profile.get("PinnedFavorites", [])[:5]
-        if not favorites:
-            self.pinned_section.pack_forget()
-            return
-
-        if not self.pinned_section.winfo_manager():
-            self.pinned_section.pack(fill="x", padx=15, pady=(0, 10))
-
-        for app in favorites:
-            ctk.CTkButton(
-                self.pinned_list_frame,
-                text=f"{app.get('Icon', '📦')} {app['Name']}"[:34],
-                height=30,
-                font=("Segoe UI", 11),
-                fg_color="transparent",
-                border_width=1,
-                border_color=Theme.BORDER,
-                hover_color=Theme.BG_CARD_HOVER,
-                anchor="w",
-                command=lambda a=app: self._fetch_single_app(a),
-            ).pack(fill="x", pady=(0, 5))
-
-        ctk.CTkButton(
-            self.pinned_list_frame,
-            text="Clear Pins",
-            height=26,
-            font=("Segoe UI", 10),
-            fg_color="transparent",
-            border_width=1,
-            border_color=Theme.BORDER,
-            hover_color=Theme.BG_CARD_HOVER,
-            command=self._clear_pinned_favorites,
-        ).pack(fill="x", pady=(2, 0))
+        self.pinned_section.pack_forget()
 
     def _search_from_history(self, query):
         self.search_entry.delete(0, "end")
@@ -3889,11 +4248,30 @@ Fixes "needs to be online" and similar errors.
         self._render_pinned_favorites()
         self._update_status("Pinned apps cleared", Theme.TEXT_SECONDARY)
         self._log("INFO", "Pinned favorites cleared")
+        if self.current_view == "welcome":
+            self._show_welcome()
 
     def _format_shared_cache_path(self):
         if len(self.shared_cache_path) <= 38:
             return self.shared_cache_path
         return f"{self.shared_cache_path[:16]}...{self.shared_cache_path[-19:]}"
+
+    def _format_output_path(self):
+        if len(self.output_path) <= 42:
+            return self.output_path
+        return f"{self.output_path[:18]}...{self.output_path[-21:]}"
+
+    def _choose_output_folder(self):
+        selected = filedialog.askdirectory(
+            title="Select package output folder",
+            initialdir=self.output_path if os.path.exists(self.output_path) else DEFAULT_OUTPUT,
+        )
+        if not selected:
+            return
+        self.output_path = selected
+        self.output_path_label.configure(text=self._format_output_path())
+        self._save_download_state()
+        self._log("INFO", f"Output directory changed: {self.output_path}")
 
     def _update_shared_cache_state(self):
         state = "enabled" if self.shared_cache_enabled.get() else "disabled"
@@ -3954,6 +4332,7 @@ Fixes "needs to be online" and similar errors.
             return
 
         self.source_health = statuses
+        self._post_ui(self._refresh_workspace_source_status)
         for status in statuses:
             level = "SUCCESS" if status.get("Available") else "WARNING"
             self._post_ui(lambda s=status, lvl=level: self._log(lvl, source_status_summary(s)))
@@ -4377,15 +4756,22 @@ Fixes "needs to be online" and similar errors.
             widget.destroy()
         
         if not self.download_queue:
-            ctk.CTkLabel(self.queue_scroll, text="📭\n\nNo files in queue", font=("Segoe UI", 12), text_color=Theme.TEXT_MUTED, justify="center").pack(expand=True, pady=40)
+            ctk.CTkLabel(
+                self.queue_scroll,
+                text="○\n\nNo packages queued\n\nFind an app or browse a category\nto stage installation files.",
+                font=("Segoe UI", 11),
+                text_color=Theme.TEXT_MUTED,
+                justify="center",
+            ).pack(expand=True, pady=32)
         else:
             for pkg in self.download_queue:
                 QueueItem(self.queue_scroll, pkg).pack(fill="x", pady=3, padx=5)
         
-        self.queue_count.configure(text=f"{len(self.download_queue)} items")
+        count = len(self.download_queue)
+        self.queue_count.configure(text=f"{count} {'item' if count == 1 else 'items'}")
 
     def _save_download_state(self):
-        if self.download_queue:
+        if self.download_queue or os.path.abspath(self.output_path) != os.path.abspath(DEFAULT_OUTPUT):
             StoreAPI.write_download_state(self.download_queue, self.output_path)
         else:
             StoreAPI.clear_download_state()
@@ -4703,6 +5089,7 @@ Fixes "needs to be online" and similar errors.
             height=32,
             font=("Segoe UI", 12),
             fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
             border_width=1,
             border_color=Theme.BORDER,
             hover_color=Theme.BG_CARD_HOVER,

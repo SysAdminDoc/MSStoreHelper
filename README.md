@@ -2,7 +2,7 @@
 
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
-![Version](https://img.shields.io/badge/version-3.35.0-blue)
+![Version](https://img.shields.io/badge/version-3.36.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -22,6 +22,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 🔎 **LTSC Gap Scan** - Detects missing LTSC components and queues the matching Store packages automatically
 - 🎮 **Xbox Core Queue** - Queues Xbox Identity and Gaming Services with known-good version pinning and fallback logging
 - ⭐ **User Profile** - Stores recent searches and pinned favorite apps per Windows user profile
+- **Workspace UI** - Uses a responsive graphite/cyan shell with scroll-safe navigation, source/signature/admin status, favorites, and a dedicated queue inspector
 - 🎨 **Theme Modes** - Uses System, Dark, or Light mode with Windows accent-color matching
 - 📝 **Release Notes** - Fetches per-app notes from Microsoft Store product pages
 - ✨ **Smart Select** - Automatically picks the best packages and dependency frameworks (bundles, correct architecture, newest versions)
@@ -124,7 +125,7 @@ python MSStoreHelper.py --mirror C:\MSStoreMirror --host 0.0.0.0 --port 8765 --j
 5. **Scan LTSC Gaps**: Click **"🔎 Scan LTSC Gaps"** to detect and queue missing tracked components
 6. **Xbox Core**: Click **"🎮 Queue Xbox Core"** to queue Xbox Identity and Gaming Services through the pinned install path
 7. **Keep Updated**: Enable **"Keep updated"** or click **"Check"** to queue newer packages for installed catalog apps
-8. **Pin Favorites**: Select apps and click **"Pin Selected"** to keep them in the sidebar for this Windows user
+8. **Pin Favorites**: Select apps and click **"Pin Selected"** to show them in the Workspace for this Windows user
 9. **Release Notes**: Click **"Notes"** on an app row to fetch Microsoft Store page notes
 
 ### 📦 Downloading Packages
@@ -266,7 +267,7 @@ MSStoreHelper/
 Default settings can be modified at the top of `MSStoreHelper.py`:
 
 ```python
-APP_VERSION = "3.35.0"
+APP_VERSION = "3.36.0"
 DEFAULT_OUTPUT = os.path.join(os.environ['USERPROFILE'], "Downloads", "MSStoreHelper")
 ```
 

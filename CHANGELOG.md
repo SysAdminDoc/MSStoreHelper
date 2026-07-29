@@ -2,6 +2,13 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## [v3.36.0] - 2026-07-29
+
+- Reimagined the desktop shell as a continuous graphite/cyan workspace with a compact navigation rail, central trust status, and dedicated queue inspector.
+- Made navigation and content surfaces scroll-safe at the supported 1000×600 minimum window while keeping every queue action visible.
+- Added persistent package output-folder controls and strengthened small-label contrast coverage across dark and light surfaces.
+- Replaced the stale README screenshot with the verified v3.36.0 workspace.
+
 ## [v3.35.0] - 2026-06-29
 
 - Added a telemetry-free local HTTP mirror for downloaded AppX/MSIX caches with a generated JSON package index.

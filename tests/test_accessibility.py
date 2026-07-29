@@ -9,9 +9,13 @@ class AccessibilityTests(unittest.TestCase):
     def test_theme_text_contrast_meets_wcag_aa_for_core_surfaces(self):
         pairs = [
             (Theme.TEXT_PRIMARY, Theme.BG_DARK),
+            (Theme.TEXT_PRIMARY, Theme.BG_SIDEBAR),
             (Theme.TEXT_PRIMARY, Theme.BG_CARD),
+            (Theme.TEXT_PRIMARY, Theme.BG_ELEVATED),
             (Theme.TEXT_SECONDARY, Theme.BG_DARK),
+            (Theme.TEXT_SECONDARY, Theme.BG_SIDEBAR),
             (Theme.TEXT_SECONDARY, Theme.BG_CARD),
+            (Theme.TEXT_SECONDARY, Theme.BG_ELEVATED),
             (Theme.TEXT_PRIMARY, Theme.BG_INPUT),
         ]
 
@@ -24,13 +28,21 @@ class AccessibilityTests(unittest.TestCase):
                     )
                     self.assertGreaterEqual(ratio, 4.5)
 
-    def test_theme_muted_text_contrast_meets_large_text_threshold(self):
+    def test_theme_muted_text_contrast_meets_wcag_aa_for_small_labels(self):
         for mode in ("Dark", "Light"):
-            ratio = Theme.contrast_ratio(
-                Theme.color_for_mode(Theme.TEXT_MUTED, mode),
-                Theme.color_for_mode(Theme.BG_CARD, mode),
-            )
-            self.assertGreaterEqual(ratio, 3.0)
+            with self.subTest(mode=mode):
+                for background in (
+                    Theme.BG_DARK,
+                    Theme.BG_SIDEBAR,
+                    Theme.BG_CARD,
+                    Theme.BG_ELEVATED,
+                    Theme.BG_INPUT,
+                ):
+                    ratio = Theme.contrast_ratio(
+                        Theme.color_for_mode(Theme.TEXT_MUTED, mode),
+                        Theme.color_for_mode(background, mode),
+                    )
+                    self.assertGreaterEqual(ratio, 4.5)
 
     def test_outline_action_text_contrast_meets_wcag_aa(self):
         for mode in ("Dark", "Light"):
