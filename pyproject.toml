@@ -22,4 +22,4 @@ dependencies = [
 msstorehelper = "MSStoreHelper:main"
 
 [tool.setuptools]
-py-modules = ["MSStoreHelper", "msstore_package_resolution", "store_sources"]
+py-modules = ["MSStoreHelper", "msstore_package_resolution", "package_ingress", "store_sources"]

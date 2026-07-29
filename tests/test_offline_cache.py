@@ -180,10 +180,19 @@ class OfflineCacheTests(unittest.TestCase):
                 ok, message = StoreAPI.rollback_package("Contoso.App", package_path)
 
             self.assertTrue(ok, message)
-            command = run_mock.call_args[0][0][-1]
+            command = run_mock.call_args.args[0][-1]
+            environment = run_mock.call_args.kwargs["env"]
             self.assertIn("Remove-AppxPackage", command)
             self.assertIn("Add-AppxPackage", command)
-            self.assertIn("Contoso.App", command)
+            self.assertNotIn(package_path, command)
+            self.assertEqual(
+                environment["MSSTOREHELPER_PACKAGE_PATH"],
+                os.path.realpath(package_path),
+            )
+            self.assertEqual(
+                environment["MSSTOREHELPER_ROLLBACK_IDENTITY"],
+                "Contoso.App",
+            )
 
     def test_download_file_writes_final_file_atomically_and_records_manifest(self):
         with tempfile.TemporaryDirectory() as temp_dir:

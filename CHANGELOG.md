@@ -2,6 +2,12 @@
 
 All notable changes to MSStoreHelper will be documented in this file.
 
+## Unreleased
+
+- Added one fail-closed package-ingress boundary for proxy metadata, downloads, persisted queues, cache/rollback records, App Installer and Intune staging, and GUI/CLI workflows.
+- Rejects traversal, Windows device names, alternate data streams, malformed package extensions, unsafe URL schemes and redirect downgrades, symlink escapes, and package paths outside their declared roots.
+- Passes install, signature-verification, and rollback package paths to PowerShell through process environment values instead of executable command text.
+
 ## [v3.36.0] - 2026-07-29
 
 - Reimagined the desktop shell as a continuous graphite/cyan workspace with a compact navigation rail, central trust status, and dedicated queue inspector.

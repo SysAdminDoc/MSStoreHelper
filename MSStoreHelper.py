@@ -45,6 +45,16 @@ from msstore_package_resolution import (
     signature_info_is_valid_microsoft,
     version_tuple_from_text,
 )
+from package_ingress import (
+    PackageIngressError,
+    ensure_path_within_root,
+    package_path as confined_package_path,
+    validate_existing_package_path,
+    validate_package_filename,
+    validate_package_record,
+    validate_package_url,
+    validate_response_redirects,
+)
 from store_sources import (
     StoreSourceError,
     detect_source_health,
@@ -815,6 +825,7 @@ class StoreAPI:
                 return diagnostic
 
             results = []
+            ingress_errors = []
             for row in table.find_all("tr"):
                 cols = row.find_all("td")
                 if not cols:
@@ -823,12 +834,22 @@ class StoreAPI:
                 link = cols[0].find("a")
                 if not link:
                     continue
-                
-                name = link.text.strip()
-                url = link['href']
-                
-                if name.endswith(".BlockMap"):
+                if link.text.strip().lower().endswith(".blockmap"):
                     continue
+                
+                try:
+                    ingress = validate_package_record(
+                        {
+                            "FileName": link.text.strip(),
+                            "Url": link.get("href"),
+                        },
+                        require_url=True,
+                    )
+                except PackageIngressError as exc:
+                    ingress_errors.append(f"Rejected unsafe package metadata: {exc}")
+                    continue
+                name = ingress["FileName"]
+                url = ingress["Url"]
                 
                 arch = "neutral"
                 lower = name.lower()
@@ -844,11 +865,16 @@ class StoreAPI:
                 package = {
                     "FileName": name, "Url": url, "Architecture": arch,
                     "FileType": ext, "IsBundle": is_bundle, "IsEncrypted": is_encrypted,
-                    "SizeBytes": None, "SizeStr": "—", "StoreQuery": query.copy()
+                    "SizeBytes": None, "SizeStr": "—", "StoreQuery": query.copy(),
+                    "SafeFileName": name,
                 }
                 results.append(annotate_package(package))
             
-            diagnostic = StoreAPI._source_diagnostic("RG-Adguard package proxy", packages=results, errors=retry_errors)
+            diagnostic = StoreAPI._source_diagnostic(
+                "RG-Adguard package proxy",
+                packages=results,
+                errors=retry_errors + ingress_errors,
+            )
             diagnostic["Query"] = query
             return diagnostic
             
@@ -874,7 +900,9 @@ class StoreAPI:
     @staticmethod
     def get_file_size(url):
         try:
+            url = validate_package_url(url)
             resp = requests.head(url, timeout=10, allow_redirects=True)
+            validate_response_redirects(url, resp)
             size = resp.headers.get('content-length')
             return int(size) if size else None
         except:
@@ -937,13 +965,24 @@ class StoreAPI:
 
     @staticmethod
     def artifact_metadata(package, artifact_path, source_url=None):
-        filename = package.get("FileName") or os.path.basename(artifact_path)
+        filename = validate_package_filename(
+            package.get("FileName") or os.path.basename(artifact_path)
+        )
+        artifact_path = validate_existing_package_path(
+            artifact_path,
+            expected_filename=filename,
+            require_file=True,
+        )
+        metadata_url = source_url or package.get("Url", "")
+        if metadata_url:
+            metadata_url = validate_package_url(metadata_url)
         metadata = {
             "FileName": filename,
-            "Path": os.path.abspath(artifact_path),
+            "SafeFileName": filename,
+            "Path": artifact_path,
             "SizeBytes": os.path.getsize(artifact_path),
             "Sha256": StoreAPI.file_sha256(artifact_path),
-            "Url": source_url or package.get("Url", ""),
+            "Url": metadata_url,
             "PackageIdentity": package_identity(filename),
             "AvailableVersion": format_version_tuple(package_version_tuple(filename)),
         }
@@ -996,18 +1035,26 @@ class StoreAPI:
     @staticmethod
     def _path_is_inside_folder(path, folder):
         try:
-            return os.path.commonpath([
-                os.path.abspath(path),
-                os.path.abspath(folder),
-            ]) == os.path.abspath(folder)
-        except ValueError:
+            ensure_path_within_root(folder, path)
+            return True
+        except (OSError, PackageIngressError, TypeError, ValueError):
             return False
 
     @staticmethod
     def _remove_cache_artifacts(folder, metadata_items):
         for metadata in metadata_items:
-            path = metadata.get("Path") or os.path.join(folder, metadata.get("FileName", ""))
-            if not path or not StoreAPI._path_is_inside_folder(path, folder):
+            try:
+                filename = validate_package_filename(metadata.get("FileName"))
+                expected_path = confined_package_path(folder, filename)
+                path = metadata.get("Path") or expected_path
+                path = validate_existing_package_path(
+                    path,
+                    expected_filename=filename,
+                    root=folder,
+                )
+                if os.path.normcase(path) != os.path.normcase(expected_path):
+                    continue
+            except (OSError, PackageIngressError, TypeError, ValueError):
                 continue
             try:
                 if os.path.exists(path):
@@ -1041,7 +1088,18 @@ class StoreAPI:
 
     @staticmethod
     def write_artifact_manifest(package, artifact_path, manifest_folder=None, source_url=None):
-        folder = manifest_folder or os.path.dirname(os.path.abspath(artifact_path))
+        folder = os.path.realpath(os.path.abspath(
+            manifest_folder or os.path.dirname(os.path.abspath(artifact_path))
+        ))
+        filename = validate_package_filename(
+            package.get("FileName") or os.path.basename(artifact_path)
+        )
+        artifact_path = validate_existing_package_path(
+            artifact_path,
+            expected_filename=filename,
+            root=folder,
+            require_file=True,
+        )
         metadata = StoreAPI.artifact_metadata(package, artifact_path, source_url)
         metadata["CachedAt"] = datetime.now(timezone.utc).isoformat()
         manifest = StoreAPI.load_cache_manifest(folder)
@@ -1099,7 +1157,7 @@ class StoreAPI:
     @staticmethod
     def download_state_queue_metadata(queue):
         allowed_keys = [
-            "FileName", "Url", "Architecture", "FileType", "IsBundle", "IsEncrypted",
+            "FileName", "SafeFileName", "Url", "Architecture", "FileType", "IsBundle", "IsEncrypted",
             "SizeBytes", "SizeStr", "Sha256", "AvailableVersion", "PackageRole",
             "PackageRoleLabel", "InstallOrder", "PackageIdentity", "LocalPath",
             "CacheManifest", "StoreQuery", "DownloadStatus", "LastError",
@@ -1108,7 +1166,9 @@ class StoreAPI:
         ]
         items = []
         for package in queue or []:
-            if not isinstance(package, dict) or not package.get("FileName") or not package.get("Url"):
+            try:
+                package = validate_package_record(package, require_url=True)
+            except PackageIngressError:
                 continue
             item = {key: package.get(key) for key in allowed_keys if key in package}
             items.append(item)
@@ -1138,7 +1198,9 @@ class StoreAPI:
 
         queue = []
         for item in data.get("Queue", []):
-            if not isinstance(item, dict) or not item.get("FileName") or not item.get("Url"):
+            try:
+                item = validate_package_record(item, require_url=True)
+            except PackageIngressError:
                 continue
             queue.append(annotate_package(item.copy()))
         return {
@@ -1245,10 +1307,34 @@ class StoreAPI:
         )
     
     @staticmethod
-    def download_file(url, filepath, progress_callback=None, package=None):
-        part_path = f"{filepath}.part"
+    def download_file(url, filepath, progress_callback=None, package=None, destination_root=None):
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+            url = validate_package_url(url)
+            validated_package = (
+                validate_package_record(package, require_url=False)
+                if package is not None
+                else None
+            )
+            filename = validate_package_filename(
+                validated_package.get("FileName")
+                if validated_package is not None
+                else os.path.basename(os.path.abspath(filepath))
+            )
+            destination_root = os.path.realpath(os.path.abspath(
+                destination_root or os.path.dirname(os.path.abspath(filepath))
+            ))
+            os.makedirs(destination_root, exist_ok=True)
+            expected_path = confined_package_path(destination_root, filename)
+            supplied_path = ensure_path_within_root(destination_root, filepath)
+            if os.path.normcase(supplied_path) != os.path.normcase(expected_path):
+                raise PackageIngressError(
+                    "Download destination does not match the validated package filename"
+                )
+            filepath = expected_path
+            part_path = ensure_path_within_root(destination_root, f"{filepath}.part")
+
+            if package is not None:
+                package.update(validated_package)
             if package is not None and StoreAPI.cached_artifact_is_valid(filepath, package):
                 package["LocalPath"] = filepath
                 return True, "Already downloaded"
@@ -1256,6 +1342,7 @@ class StoreAPI:
             existing = os.path.getsize(part_path) if os.path.exists(part_path) else 0
             headers = {"Range": f"bytes={existing}-"} if existing else None
             with requests.get(url, stream=True, timeout=60, headers=headers) as r:
+                validate_response_redirects(url, r)
                 r.raise_for_status()
                 status_code = int(getattr(r, "status_code", 200) or 200)
                 if existing and status_code != 206:
@@ -1295,15 +1382,31 @@ class StoreAPI:
 
     @staticmethod
     def cache_downloaded_artifact(package, cache_path):
-        local_path = package.get("LocalPath")
-        filename = package.get("FileName", os.path.basename(local_path or ""))
-        if not local_path or not os.path.exists(local_path):
-            return False, "Downloaded file is missing"
-        if not StoreAPI.is_cacheable_artifact(filename):
+        original_package = package
+        raw_filename = (
+            package.get("FileName", os.path.basename(package.get("LocalPath") or ""))
+            if isinstance(package, dict)
+            else ""
+        )
+        if not StoreAPI.is_cacheable_artifact(raw_filename):
             return False, "File type is not cacheable"
-
-        os.makedirs(cache_path, exist_ok=True)
-        destination = os.path.join(cache_path, filename)
+        try:
+            package = validate_package_record(package, require_url=False)
+            local_path = validate_existing_package_path(
+                package.get("LocalPath"),
+                expected_filename=package["FileName"],
+                require_file=True,
+            )
+        except PackageIngressError as exc:
+            return False, str(exc)
+        filename = package["FileName"]
+        if not os.path.exists(local_path):
+            return False, "Downloaded file is missing"
+        try:
+            os.makedirs(cache_path, exist_ok=True)
+            destination = confined_package_path(cache_path, filename)
+        except (OSError, PackageIngressError) as exc:
+            return False, str(exc)
         manifest = StoreAPI.load_cache_manifest(cache_path)
         existing_metadata = manifest["Artifacts"].get(filename)
         if StoreAPI.cached_artifact_is_valid(destination, existing_metadata):
@@ -1322,6 +1425,8 @@ class StoreAPI:
 
         shutil.copy2(local_path, destination)
         StoreAPI.write_artifact_manifest(package, destination, cache_path)
+        if isinstance(original_package, dict):
+            original_package.update(package)
         return True, f"Cached: {destination}"
 
     @staticmethod
@@ -1337,8 +1442,18 @@ class StoreAPI:
         base_url = f"http://{host}:{int(port)}"
 
         for filename in sorted(os.listdir(folder), key=str.lower):
-            path = os.path.join(folder, filename)
-            if not os.path.isfile(path) or not StoreAPI.is_cacheable_artifact(filename):
+            try:
+                filename = validate_package_filename(filename)
+                path = confined_package_path(folder, filename)
+                path = validate_existing_package_path(
+                    path,
+                    expected_filename=filename,
+                    root=folder,
+                    require_file=True,
+                )
+            except PackageIngressError:
+                continue
+            if not StoreAPI.is_cacheable_artifact(filename):
                 continue
             metadata = artifacts.get(filename, {}).copy()
             if metadata and not StoreAPI.cached_artifact_is_valid(path, metadata):
@@ -1463,9 +1578,22 @@ class StoreAPI:
                 for item in items or []:
                     if not isinstance(item, dict) or not item.get("FileName"):
                         continue
-                    metadata = item.copy()
+                    try:
+                        metadata = validate_package_record(item, require_url=False)
+                        expected_path = confined_package_path(folder, metadata["FileName"])
+                        metadata_path = metadata.get("Path") or expected_path
+                        metadata_path = validate_existing_package_path(
+                            metadata_path,
+                            expected_filename=metadata["FileName"],
+                            root=folder,
+                            require_file=True,
+                        )
+                        if os.path.normcase(metadata_path) != os.path.normcase(expected_path):
+                            continue
+                    except PackageIngressError:
+                        continue
                     metadata["PackageIdentity"] = str(metadata.get("PackageIdentity") or identity)
-                    metadata["Path"] = metadata.get("Path") or os.path.join(folder, metadata["FileName"])
+                    metadata["Path"] = metadata_path
                     metadata["CacheFolder"] = folder
                     key = (metadata["PackageIdentity"].lower(), metadata["FileName"].lower(), os.path.abspath(metadata["Path"]).lower())
                     if key in seen or not StoreAPI.cached_artifact_is_valid(metadata["Path"], metadata):
@@ -1521,15 +1649,21 @@ class StoreAPI:
 
     @staticmethod
     def rollback_package(package_identity_name, artifact_path):
-        if not os.path.exists(artifact_path):
-            return False, "Rollback package is missing"
+        try:
+            package_path = validate_existing_package_path(
+                artifact_path,
+                require_file=True,
+            )
+        except PackageIngressError as exc:
+            return False, str(exc)
+        identity = str(package_identity_name or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", identity):
+            return False, "Rollback package identity is invalid"
 
-        identity = StoreAPI._powershell_literal(package_identity_name)
-        package_path = StoreAPI._powershell_literal(os.path.abspath(artifact_path))
         cmd = "\n".join([
             "$ErrorActionPreference = 'Stop'",
-            f"$identity = {identity}",
-            f"$path = {package_path}",
+            "$identity = $env:MSSTOREHELPER_ROLLBACK_IDENTITY",
+            "$path = $env:MSSTOREHELPER_PACKAGE_PATH",
             "$current = Get-AppxPackage -Name $identity | Sort-Object Version -Descending | Select-Object -First 1",
             "if ($current) {",
             "    try {",
@@ -1547,11 +1681,15 @@ class StoreAPI:
         ])
 
         try:
+            environment = os.environ.copy()
+            environment["MSSTOREHELPER_PACKAGE_PATH"] = package_path
+            environment["MSSTOREHELPER_ROLLBACK_IDENTITY"] = identity
             result = subprocess.run(
                 [POWERSHELL_EXE, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
                 capture_output=True,
                 text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                env=environment,
             )
             if result.returncode == 0:
                 return True, result.stdout.strip() or "Rollback installed"
@@ -1590,10 +1728,13 @@ class StoreAPI:
     def generate_dism_provision_script(packages, output_path, target_arch=SYSTEM_ARCH, script_dir=None):
         provisionable = []
         for package in packages:
-            if not package.get("FileName") or not is_installable_package(package):
+            if not package.get("FileName"):
                 continue
-
-            provisionable.append(annotate_package(package.copy()))
+            if str(package["FileName"]).lower().endswith(".blockmap"):
+                continue
+            package = validate_package_record(package, require_url=False)
+            if is_installable_package(package):
+                provisionable.append(annotate_package(package))
 
         provisionable = StoreAPI.order_packages_for_install(provisionable, target_arch)
         if not provisionable:
@@ -1619,7 +1760,7 @@ class StoreAPI:
 
         for package in provisionable:
             filename = package["FileName"]
-            package_path = package.get("LocalPath") or os.path.join(output_path, filename)
+            package_path = StoreAPI._queue_package_source_path(package, output_path)
             portable_path = StoreAPI._portable_script_path(package_path, script_dir)
             role = package.get("PackageRoleLabel") or package_role_label(filename)
             query = StoreAPI._package_store_query(package)
@@ -1867,8 +2008,10 @@ class StoreAPI:
         if not os.path.exists(source_path):
             raise ValueError(f"Downloaded file is missing: {package.get('FileName')}")
 
-        filename = package.get("FileName") or os.path.basename(source_path)
-        destination = os.path.join(package_dir, filename)
+        filename = validate_package_filename(
+            package.get("FileName") or os.path.basename(source_path)
+        )
+        destination = confined_package_path(package_dir, filename)
         if os.path.abspath(source_path).lower() != os.path.abspath(destination).lower():
             shutil.copy2(source_path, destination)
 
@@ -1948,11 +2091,15 @@ class StoreAPI:
 
     @staticmethod
     def write_appinstaller_export(packages, output_path, appinstaller_path, target_arch=SYSTEM_ARCH):
-        installable = [
-            annotate_package(package.copy())
-            for package in packages
-            if package.get("FileName") and is_installable_package(package)
-        ]
+        installable = []
+        for package in packages:
+            if not package.get("FileName"):
+                continue
+            if str(package["FileName"]).lower().endswith(".blockmap"):
+                continue
+            package = validate_package_record(package, require_url=False)
+            if is_installable_package(package):
+                installable.append(annotate_package(package))
         installable = StoreAPI.order_packages_for_install(installable, target_arch)
         if not installable:
             raise ValueError("No AppX/MSIX packages are available for App Installer export")
@@ -1960,7 +2107,13 @@ class StoreAPI:
         appinstaller_path = os.path.abspath(appinstaller_path)
         export_dir = os.path.dirname(appinstaller_path)
         os.makedirs(export_dir, exist_ok=True)
-        package_dir = os.path.join(export_dir, f"{StoreAPI._safe_filename_stem(appinstaller_path, 'MSStoreHelper-AppInstaller')}-Packages")
+        package_dir = ensure_path_within_root(
+            export_dir,
+            os.path.join(
+                export_dir,
+                f"{StoreAPI._safe_filename_stem(appinstaller_path, 'MSStoreHelper-AppInstaller')}-Packages",
+            ),
+        )
         if os.path.isdir(package_dir):
             if os.path.commonpath([export_dir, os.path.abspath(package_dir)]) != export_dir:
                 raise ValueError("Invalid App Installer package path")
@@ -2053,16 +2206,26 @@ class StoreAPI:
 
     @staticmethod
     def _queue_package_source_path(package, output_path):
+        package = validate_package_record(package, require_url=False)
         filename = package["FileName"]
-        return os.path.abspath(package.get("LocalPath") or os.path.join(output_path, filename))
+        if package.get("LocalPath"):
+            return validate_existing_package_path(
+                package["LocalPath"],
+                expected_filename=filename,
+            )
+        return confined_package_path(output_path, filename)
 
     @staticmethod
     def _intune_package_records(packages, output_path, target_arch=SYSTEM_ARCH):
         provisionable = []
         for package in packages:
-            if not package.get("FileName") or not is_installable_package(package):
+            if not package.get("FileName"):
                 continue
-            provisionable.append(annotate_package(package.copy()))
+            if str(package["FileName"]).lower().endswith(".blockmap"):
+                continue
+            package = validate_package_record(package, require_url=False)
+            if is_installable_package(package):
+                provisionable.append(annotate_package(package))
 
         provisionable = StoreAPI.order_packages_for_install(provisionable, target_arch)
         records = []
@@ -2177,8 +2340,14 @@ class StoreAPI:
         records = StoreAPI._intune_package_records(packages, output_path, target_arch)
         safe_basename = StoreAPI._safe_filename_stem(package_basename, "MSStoreHelper-IntuneWin")
         staging_root = os.path.abspath(staging_root)
-        source_dir = os.path.join(staging_root, safe_basename)
-        packages_dir = os.path.join(source_dir, "Packages")
+        source_dir = ensure_path_within_root(
+            staging_root,
+            os.path.join(staging_root, safe_basename),
+        )
+        packages_dir = ensure_path_within_root(
+            source_dir,
+            os.path.join(source_dir, "Packages"),
+        )
 
         if os.path.exists(source_dir):
             if os.path.commonpath([staging_root, os.path.abspath(source_dir)]) != staging_root:
@@ -2187,7 +2356,10 @@ class StoreAPI:
         os.makedirs(packages_dir, exist_ok=True)
 
         for record in records:
-            shutil.copy2(record["SourcePath"], os.path.join(packages_dir, record["FileName"]))
+            shutil.copy2(
+                record["SourcePath"],
+                confined_package_path(packages_dir, record["FileName"]),
+            )
 
         install_script = f"{safe_basename}.ps1"
         setup_file = f"{safe_basename}.cmd"
@@ -2298,12 +2470,24 @@ class StoreAPI:
     @staticmethod
     def install_package(filepath):
         try:
-            cmd = f'Add-AppxPackage -Path "{filepath}" -ErrorAction Stop 2>&1'
+            package_path = validate_existing_package_path(
+                filepath,
+                require_file=True,
+            )
+            cmd = "\n".join([
+                "$ErrorActionPreference = 'Stop'",
+                "$path = $env:MSSTOREHELPER_PACKAGE_PATH",
+                "if ([string]::IsNullOrWhiteSpace($path)) { throw 'Package path is missing' }",
+                "Add-AppxPackage -Path $path -ErrorAction Stop",
+            ])
+            environment = os.environ.copy()
+            environment["MSSTOREHELPER_PACKAGE_PATH"] = package_path
             result = subprocess.run(
                 [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
                 capture_output=True,
                 text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                env=environment,
             )
             
             if result.returncode != 0:
@@ -2317,11 +2501,15 @@ class StoreAPI:
     @staticmethod
     def verify_package_signature(filepath):
         try:
-            safe_path = filepath.replace("'", "''")
+            package_path = validate_existing_package_path(
+                filepath,
+                require_file=True,
+            )
             safe_module = POWERSHELL_SECURITY_MODULE.replace("'", "''")
             cmd = f"""
 Import-Module '{safe_module}' -ErrorAction Stop
-$path = '{safe_path}'
+$path = $env:MSSTOREHELPER_PACKAGE_PATH
+if ([string]::IsNullOrWhiteSpace($path)) {{ throw 'Package path is missing' }}
 $sig = Get-AuthenticodeSignature -FilePath $path
 $chainOk = $false
 $rootSubject = ''
@@ -2345,11 +2533,14 @@ if ($sig.SignerCertificate) {{
     ChainValid = $chainOk
 }} | ConvertTo-Json -Compress
 """
+            environment = os.environ.copy()
+            environment["MSSTOREHELPER_PACKAGE_PATH"] = package_path
             result = subprocess.run(
                 [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
                 capture_output=True,
                 text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                env=environment,
             )
             if result.returncode != 0:
                 error_msg = result.stderr.strip() or result.stdout.strip() or "Signature check failed"
@@ -4461,11 +4652,16 @@ Fixes "needs to be online" and similar errors.
         }
         queued_count = 0
         for package in packages:
-            filename = package.get("FileName", "")
-            key = filename.lower()
-            if not filename or key in queued_names:
+            try:
+                package = validate_package_record(package, require_url=True)
+            except PackageIngressError as exc:
+                self._log("WARNING", f"Rejected unsafe package metadata: {exc}")
                 continue
-            self.download_queue.append(annotate_package(package.copy()))
+            filename = package["FileName"]
+            key = filename.lower()
+            if key in queued_names:
+                continue
+            self.download_queue.append(annotate_package(package))
             queued_names.add(key)
             queued_count += 1
 
@@ -4738,7 +4934,12 @@ Fixes "needs to be online" and similar errors.
         for pkg in self.current_packages:
             if pkg['FileName'] in self.selected_packages:
                 if not any(q['FileName'] == pkg['FileName'] for q in self.download_queue):
-                    self.download_queue.append(annotate_package(pkg.copy()))
+                    try:
+                        package = validate_package_record(pkg, require_url=True)
+                    except PackageIngressError as exc:
+                        self._log("WARNING", f"Rejected unsafe package metadata: {exc}")
+                        continue
+                    self.download_queue.append(annotate_package(package))
                     count += 1
 
         self.download_queue = StoreAPI.order_packages_for_install(self.download_queue, self._target_arch())
@@ -4960,14 +5161,26 @@ Fixes "needs to be online" and similar errors.
         success_count = 0
         
         for i, pkg in enumerate(self.download_queue):
-            fname = pkg['FileName']
+            try:
+                validated_package = validate_package_record(pkg, require_url=True)
+                pkg.update(validated_package)
+                fname = validated_package["FileName"]
+                filepath = confined_package_path(self.output_path, fname)
+            except PackageIngressError as exc:
+                pkg["DownloadStatus"] = "Failed"
+                pkg["LastError"] = str(exc)
+                pkg.pop("LocalPath", None)
+                self._save_download_state()
+                if '_status_widget' in pkg:
+                    self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Path blocked", text_color=Theme.DANGER))
+                self.after(0, lambda e=str(exc): self._log("ERROR", f"Rejected unsafe package: {e}"))
+                continue
             self.after(0, lambda n=fname: self._update_status(f"⬇️ Downloading {n[:40]}...", Theme.INFO))
             self.after(0, lambda n=fname, idx=i+1, tot=total: self._log("INFO", f"[{idx}/{tot}] Downloading: {n}"))
             
             if '_status_widget' in pkg:
                 self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Downloading...", text_color=Theme.INFO))
             
-            filepath = os.path.join(self.output_path, fname)
             pkg['LocalPath'] = filepath
             pkg["DownloadStatus"] = "Downloading"
             pkg.pop("LastError", None)
@@ -5187,7 +5400,17 @@ Fixes "needs to be online" and similar errors.
         
         for i, pkg in enumerate(packages):
             fname = pkg['FileName']
-            filepath = pkg['LocalPath']
+            try:
+                filepath = validate_existing_package_path(
+                    pkg["LocalPath"],
+                    expected_filename=fname,
+                    require_file=True,
+                )
+            except PackageIngressError as exc:
+                if '_status_widget' in pkg:
+                    self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Path blocked", text_color=Theme.DANGER))
+                self.after(0, lambda n=fname, e=str(exc): self._log("ERROR", f"  Blocked unsafe package path for {n}: {e}"))
+                continue
             package_name = pkg.get("PackageIdentity") or package_identity(fname)
             available_version = pkg.get("AvailableVersion") or format_version_tuple(package_version_tuple(fname))
             
@@ -5513,11 +5736,18 @@ def _cli_download_selected(packages, output_path, stderr):
     downloaded = []
     os.makedirs(output_path, exist_ok=True)
     for package in packages:
-        filename = package.get("FileName", "")
-        if not filename:
-            records.append(_cli_package_record(package, "failed", "Package filename is missing"))
+        try:
+            package = validate_package_record(package, require_url=True)
+            filename = package["FileName"]
+            path = confined_package_path(output_path, filename)
+        except PackageIngressError as exc:
+            records.append(_cli_package_record(
+                package if isinstance(package, dict) else {},
+                "failed",
+                str(exc),
+            ))
+            _cli_print(f"download blocked: {exc}", stderr)
             continue
-        path = os.path.join(output_path, filename)
         ok, message = StoreAPI.download_file(package.get("Url", ""), path, package=package)
         if ok:
             package["LocalPath"] = path
@@ -5535,10 +5765,22 @@ def _cli_install_downloaded(packages, records, stderr):
     failed_count = 0
 
     for package in packages:
-        local_path = package.get("LocalPath", "")
-        if not local_path or not os.path.exists(local_path):
+        try:
+            package = validate_package_record(package, require_url=False)
+            local_path = validate_existing_package_path(
+                package.get("LocalPath"),
+                expected_filename=package["FileName"],
+                require_file=True,
+            )
+        except PackageIngressError as exc:
             failed_count += 1
-            _cli_set_package_record(records, package, "failed", "Downloaded file is missing", local_path)
+            _cli_set_package_record(
+                records,
+                package if isinstance(package, dict) else {},
+                "failed",
+                str(exc),
+                "",
+            )
             continue
 
         should_skip, installed_version, package_name = StoreAPI.should_skip_installed_package(package)

@@ -103,15 +103,23 @@ class MockedIntegrationHarnessTests(unittest.TestCase):
             "Root": "CN=Contoso Root",
             "ChainValid": True,
         }
-        with patch("MSStoreHelper.subprocess.run", return_value=FakeRunResult(0, json.dumps(signature), "")):
-            ok, message = StoreAPI.verify_package_signature(r"C:\Packages\Contoso.msix")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package_path = os.path.join(temp_dir, "Contoso.msix")
+            with open(package_path, "wb") as handle:
+                handle.write(b"package")
+            with patch("MSStoreHelper.subprocess.run", return_value=FakeRunResult(0, json.dumps(signature), "")):
+                ok, message = StoreAPI.verify_package_signature(package_path)
 
         self.assertFalse(ok)
         self.assertIn("Contoso", message)
 
     def test_appx_install_failure_returns_powershell_output(self):
-        with patch("MSStoreHelper.subprocess.run", return_value=FakeRunResult(1, "", "0x80073CF3 dependency missing")):
-            ok, message = StoreAPI.install_package(r"C:\Packages\Contoso.msix")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package_path = os.path.join(temp_dir, "Contoso.msix")
+            with open(package_path, "wb") as handle:
+                handle.write(b"package")
+            with patch("MSStoreHelper.subprocess.run", return_value=FakeRunResult(1, "", "0x80073CF3 dependency missing")):
+                ok, message = StoreAPI.install_package(package_path)
 
         self.assertFalse(ok)
         self.assertIn("0x80073CF3", message)

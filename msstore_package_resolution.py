@@ -4,7 +4,13 @@
 import os
 import re
 
-INSTALLABLE_EXTENSIONS = {".appx", ".msix", ".appxbundle", ".msixbundle"}
+from package_ingress import (
+    INSTALLABLE_PACKAGE_EXTENSIONS,
+    PackageIngressError,
+    validate_package_filename,
+)
+
+INSTALLABLE_EXTENSIONS = INSTALLABLE_PACKAGE_EXTENSIONS
 
 ROLE_ORDER = {
     "net_native_framework": 10,
@@ -69,6 +75,10 @@ def package_extension(package):
 
 
 def is_installable_package(package):
+    try:
+        validate_package_filename(package["FileName"])
+    except (KeyError, PackageIngressError):
+        return False
     ext = package_extension(package)
     if ext not in INSTALLABLE_EXTENSIONS:
         return False

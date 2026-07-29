@@ -29,6 +29,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - ⏭️ **Delta Detection** - Skips packages when the same or newer version is already installed
 - 🧭 **Architecture Override** - Force x64, x86, ARM64, ARM, or neutral package selection when needed
 - 🛡️ **Signature Verification** - Blocks installs unless the package signature chains to Microsoft
+- **Package Ingress Guard** - Rejects unsafe package names, URLs, redirects, persisted paths, cache entries, and export staging before they can reach disk or PowerShell
 - 🔐 **Verified Downloads** - Writes packages atomically and records SHA-256 metadata before cache reuse
 - **Resumable Downloads** - Persists the queue across restarts and resumes `.part` downloads with HTTP Range requests
 - **Keep Updated Mode** - Re-checks installed catalog apps and queues newer Store bundles while the app is open
@@ -233,10 +234,12 @@ MSStoreHelper/
 ├── MSStoreHelper.py               # Main application
 ├── store_sources.py               # Store source health, retry, and fallback helpers
 ├── msstore_package_resolution.py  # Package selection and install ordering
+├── package_ingress.py             # Package filename, URL, and path boundary
 ├── pyproject.toml                 # Python package metadata
 ├── requirements.txt               # Pinned runtime dependencies
 ├── tests/
 │   ├── test_package_resolution.py # Resolver tests
+│   ├── test_package_ingress.py    # Adversarial ingress and path tests
 │   ├── test_store_repair.py       # Store repair tests
 │   ├── test_offline_cache.py      # Shared cache tests
 │   ├── test_dism_export.py        # DISM export tests
