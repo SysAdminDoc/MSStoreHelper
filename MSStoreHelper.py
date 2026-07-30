@@ -68,6 +68,14 @@ from package_trust import (
     review_trust_report,
     trust_report_allows_automation,
 )
+from diagnostic_bundle import (
+    DiagnosticRedactionError,
+    diagnostic_preview_text,
+    prepare_diagnostic_entries,
+    redact_structure,
+    redact_text,
+    write_prepared_bundle,
+)
 from repair_transaction import (
     DEFAULT_REPAIR_RETENTION,
     RepairTransactionError,
@@ -1526,26 +1534,17 @@ if ($sig.SignerCertificate) {{
 
     @staticmethod
     def redact_diagnostic_text(text):
-        redacted = str(text or "")
-        path_tokens = {
-            "USERPROFILE": os.environ.get("USERPROFILE"),
-            "APPDATA": os.environ.get("APPDATA"),
-            "LOCALAPPDATA": os.environ.get("LOCALAPPDATA"),
-            "TEMP": tempfile.gettempdir(),
-            "APP_DATA": APP_DATA_DIR,
-        }
-        for label, path in path_tokens.items():
-            if path:
-                redacted = redacted.replace(path, f"%{label}%")
-                redacted = redacted.replace(path.replace("\\", "/"), f"%{label}%")
+        return redact_text(
+            text,
+            path_tokens={"APP_DATA": APP_DATA_DIR},
+        )
 
-        secret_patterns = [
-            r"(?i)(authorization\s*[:=]\s*)([^\s;]+)",
-            r"(?i)((?:api[_-]?key|password|secret|token)\s*[:=]\s*)([^\s;]+)",
-        ]
-        for pattern in secret_patterns:
-            redacted = re.sub(pattern, r"\1[REDACTED]", redacted)
-        return redacted
+    @staticmethod
+    def redact_diagnostic_structure(value):
+        return redact_structure(
+            value,
+            path_tokens={"APP_DATA": APP_DATA_DIR},
+        )
 
     @staticmethod
     def diagnostic_queue_metadata(queue):
@@ -1562,10 +1561,7 @@ if ($sig.SignerCertificate) {{
         items = []
         for package in queue or []:
             item = {key: package.get(key) for key in allowed_keys if key in package}
-            for key in ("LocalPath", "CacheManifest"):
-                if key in item:
-                    item[key] = StoreAPI.redact_diagnostic_text(item[key])
-            items.append(item)
+            items.append(StoreAPI.redact_diagnostic_structure(item))
         return items
 
     @staticmethod
@@ -1654,11 +1650,9 @@ if ($sig.SignerCertificate) {{
 
         recent = []
         for _mtime, data in sorted(manifests, reverse=True)[:limit]:
-            text = StoreAPI.redact_diagnostic_text(json.dumps(data, indent=2))
-            try:
-                recent.append(json.loads(text))
-            except json.JSONDecodeError:
-                recent.append({"Raw": text})
+            recent.append(
+                StoreAPI.redact_diagnostic_structure(data)
+            )
         return recent
 
     @staticmethod
@@ -1671,10 +1665,15 @@ if ($sig.SignerCertificate) {{
         return "\n".join(lines)
 
     @staticmethod
-    def write_diagnostics_bundle(bundle_path, app_version, system_arch, is_admin, output_path, source_health, queue, log_text):
-        os.makedirs(os.path.dirname(os.path.abspath(bundle_path)), exist_ok=True)
-        redacted_log = StoreAPI.redact_diagnostic_text(log_text)
-        redacted_transcript = StoreAPI.redact_diagnostic_text(StoreAPI.powershell_transcript_from_log(log_text))
+    def prepare_diagnostics_bundle(
+        app_version,
+        system_arch,
+        is_admin,
+        output_path,
+        source_health,
+        queue,
+        log_text,
+    ):
         queue_metadata = StoreAPI.diagnostic_queue_metadata(queue)
         repair_manifests = StoreAPI.collect_recent_repair_manifests()
         diagnostics = {
@@ -1689,24 +1688,48 @@ if ($sig.SignerCertificate) {{
             },
             "Python": {
                 "Version": platform.python_version(),
-                "Executable": StoreAPI.redact_diagnostic_text(sys.executable),
+                "Executable": sys.executable,
             },
             "SystemArchitecture": system_arch,
             "IsAdmin": bool(is_admin),
-            "OutputPath": StoreAPI.redact_diagnostic_text(output_path),
+            "OutputPath": output_path,
             "SourceHealth": source_health or [],
             "QueueCount": len(queue_metadata),
             "RepairManifestCount": len(repair_manifests),
         }
+        return prepare_diagnostic_entries(
+            diagnostics=diagnostics,
+            source_health=source_health or [],
+            queue=queue_metadata,
+            app_log=log_text,
+            powershell_transcript=(
+                StoreAPI.powershell_transcript_from_log(log_text)
+            ),
+            repair_manifests=repair_manifests,
+            path_tokens={"APP_DATA": APP_DATA_DIR},
+        )
 
-        with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("diagnostics.json", json.dumps(diagnostics, indent=2))
-            archive.writestr("source-health.json", json.dumps(source_health or [], indent=2))
-            archive.writestr("queue.json", json.dumps(queue_metadata, indent=2))
-            archive.writestr("app-log.txt", redacted_log)
-            archive.writestr("powershell-transcript.txt", redacted_transcript)
-            archive.writestr("repair-manifests.json", json.dumps(repair_manifests, indent=2))
-        return bundle_path
+    @staticmethod
+    def write_diagnostics_bundle(
+        bundle_path,
+        app_version,
+        system_arch,
+        is_admin,
+        output_path,
+        source_health,
+        queue,
+        log_text,
+    ):
+        entries = StoreAPI.prepare_diagnostics_bundle(
+            app_version,
+            system_arch,
+            is_admin,
+            output_path,
+            source_health,
+            queue,
+            log_text,
+        )
+        return write_prepared_bundle(bundle_path, entries)
 
     @staticmethod
     def cached_artifact_is_valid(path, metadata):
@@ -5796,21 +5819,8 @@ Fixes "needs to be online" and similar errors.
         threading.Thread(target=self._download_worker, daemon=True).start()
 
     def _export_diagnostics_bundle(self):
-        initial_dir = self.output_path if os.path.exists(self.output_path) else DEFAULT_OUTPUT
-        os.makedirs(initial_dir, exist_ok=True)
-        bundle_path = filedialog.asksaveasfilename(
-            title="Save diagnostics bundle",
-            initialdir=initial_dir,
-            initialfile=f"MSStoreHelper-Diagnostics-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip",
-            defaultextension=".zip",
-            filetypes=[("ZIP archive", "*.zip"), ("All files", "*.*")],
-        )
-        if not bundle_path:
-            return
-
         try:
-            StoreAPI.write_diagnostics_bundle(
-                bundle_path,
+            entries = StoreAPI.prepare_diagnostics_bundle(
                 APP_VERSION,
                 SYSTEM_ARCH,
                 IS_ADMIN,
@@ -5819,12 +5829,144 @@ Fixes "needs to be online" and similar errors.
                 self.download_queue,
                 self._current_log_text(),
             )
-        except Exception as exc:
-            self._update_status("âŒ Diagnostics export failed", Theme.DANGER)
-            self._log("ERROR", f"Failed to export diagnostics bundle: {exc}")
-        else:
-            self._update_status("âœ… Diagnostics exported", Theme.SUCCESS)
-            self._log("SUCCESS", f"Diagnostics bundle saved: {bundle_path}")
+        except (DiagnosticRedactionError, OSError, ValueError) as exc:
+            self._update_status(
+                "Diagnostics redaction failed closed",
+                Theme.DANGER,
+            )
+            self._log(
+                "ERROR",
+                f"Diagnostics preview was not created: {exc}",
+            )
+            return
+        self._show_diagnostics_preview(entries)
+
+    def _show_diagnostics_preview(self, entries):
+        preview = diagnostic_preview_text(entries)
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Preview redacted diagnostics")
+        dialog.geometry("820x700")
+        dialog.minsize(620, 500)
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(0, weight=1)
+
+        content = ctk.CTkFrame(dialog, fg_color="transparent")
+        content.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=22,
+            pady=20,
+        )
+        content.grid_columnconfigure(0, weight=1)
+        content.grid_rowconfigure(3, weight=1)
+        ctk.CTkLabel(
+            content,
+            text="Preview exact diagnostic ZIP contents",
+            font=("Segoe UI Semibold", 20),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(
+            content,
+            text=(
+                "Nothing has been saved. The ZIP will contain exactly "
+                "the inventory and redacted values shown below."
+            ),
+            font=("Segoe UI", 11),
+            text_color=Theme.TEXT_MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=560,
+        ).grid(row=1, column=0, sticky="ew", pady=(3, 12))
+        preview_box = ctk.CTkTextbox(
+            content,
+            font=("Consolas", 10),
+            fg_color=Theme.BG_INPUT,
+            text_color=Theme.TEXT_SECONDARY,
+            wrap="word",
+        )
+        preview_box.grid(row=3, column=0, sticky="nsew")
+        preview_box.insert("1.0", preview)
+        preview_box.configure(state="disabled")
+
+        actions = ctk.CTkFrame(content, fg_color="transparent")
+        actions.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        actions.grid_columnconfigure(2, weight=1)
+        ctk.CTkButton(
+            actions,
+            text="Close",
+            width=92,
+            height=34,
+            fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=dialog.destroy,
+        ).grid(row=0, column=0, padx=(0, 8))
+
+        def save_exact_bundle():
+            initial_dir = (
+                self.output_path
+                if os.path.exists(self.output_path)
+                else DEFAULT_OUTPUT
+            )
+            os.makedirs(initial_dir, exist_ok=True)
+            bundle_path = filedialog.asksaveasfilename(
+                parent=dialog,
+                title="Save reviewed diagnostics bundle",
+                initialdir=initial_dir,
+                initialfile=(
+                    "MSStoreHelper-Diagnostics-"
+                    f"{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+                ),
+                defaultextension=".zip",
+                filetypes=[
+                    ("ZIP archive", "*.zip"),
+                    ("All files", "*.*"),
+                ],
+            )
+            if not bundle_path:
+                return
+            try:
+                write_prepared_bundle(bundle_path, entries)
+            except (DiagnosticRedactionError, OSError, zipfile.BadZipFile) as exc:
+                self._update_status(
+                    "Diagnostics export failed",
+                    Theme.DANGER,
+                )
+                self._log(
+                    "ERROR",
+                    f"Failed to export diagnostics bundle: {exc}",
+                )
+                return
+            dialog.destroy()
+            self._update_status(
+                "Diagnostics exported",
+                Theme.SUCCESS,
+            )
+            self._log(
+                "SUCCESS",
+                f"Diagnostics bundle saved: {bundle_path}",
+            )
+
+        ctk.CTkButton(
+            actions,
+            text="Save Exact ZIP",
+            width=138,
+            height=34,
+            font=("Segoe UI Semibold", 11),
+            fg_color=Theme.PRIMARY,
+            hover_color=Theme.PRIMARY_HOVER,
+            command=save_exact_bundle,
+        ).grid(row=0, column=1)
+        self._update_status(
+            "Diagnostics ready for review",
+            Theme.INFO,
+        )
+        dialog.after(50, dialog.focus_force)
 
     def _export_dism_script(self):
         if not self.download_queue:

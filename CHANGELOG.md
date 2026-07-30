@@ -16,6 +16,8 @@ All notable changes to MSStoreHelper will be documented in this file.
 - Replaced generic directory mirroring with an allowlisted service that exposes only a sanitized index and hash-current, trust-approved `/packages/...` routes; directory listings, cache metadata, local paths, query-bearing requests, symlinks, and unindexed files are unreachable.
 - Added atomic concurrent index writes, verified HEAD/single-Range responses, post-start artifact integrity checks, bounded redacted JSONL access audits, and separate bind/advertised addresses.
 - Kept mirror binding loopback-only by default; non-loopback use now requires explicit LAN mode, short-lived header-only bearer authentication, and either TLS or a cleartext-risk acknowledgement.
+- Replaced shallow diagnostic regexes with fail-closed recursive redaction for structured fields and text attachments, including authorization values, quoted/spaced credentials, URL userinfo and signed-query keys, case-insensitive Windows/UNC paths, executable paths, and command transcripts.
+- Added an exact in-app diagnostic inventory/content preview and writes the reviewed bytes through a verified atomic ZIP replacement; unsupported values abort before a file is created.
 
 ## [v3.36.0] - 2026-07-29
 

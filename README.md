@@ -39,7 +39,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - **Source Health** - Detects StoreEdgeFD, RG-Adguard, WinGet, and Store CLI availability with fallback hints
 - **Store Query Controls** - Persists RG-Adguard ring, Store language, and market for localized package lookup and deployment artifacts
 - **Pinned Python Setup** - Uses `requirements.txt` and package metadata instead of runtime dependency installs
-- **Diagnostics Bundle** - Exports redacted app logs, source health, queue state, and repair manifests as a ZIP
+- **Previewed Diagnostics Bundle** - Recursively redacts credentials, signed-URL secrets, local paths, commands, source health, queue state, logs, and repair evidence, then shows the exact ZIP contents before saving
 - **Accessibility Guardrails** - Keeps core theme contrast and the welcome surface usable at 100, 125, and 150 percent scaling
 - 📥 **Download Queue** - Queue multiple packages with progress tracking
 - 📦 **Install Packages** - Install downloaded apps directly (requires Admin)
@@ -152,7 +152,7 @@ records are retained in a bounded, redacted
 5. Optional: enable **Shared cache** and pick a shared folder for air-gapped reuse
 6. Click **"⬇️ Download All"** to start downloading
 7. If a package shows **Review required**, use its queue action to inspect the package evidence and explicitly promote it; failed signature, chain, manifest, or identity checks cannot be overridden
-8. Click **"Diagnostics"** to export a redacted support ZIP with queue, source, log, and repair details
+8. Click **"Diagnostics"** to inspect the exact recursively redacted queue, source, log, command, and repair values before saving a support ZIP
 
 ### 🧾 Fleet Provisioning
 
@@ -249,6 +249,7 @@ Packages are downloaded to `%USERPROFILE%\Downloads\MSStoreHelper`. Before any p
 ```
 MSStoreHelper/
 ├── MSStoreHelper.py               # Main application
+├── diagnostic_bundle.py           # Recursive redaction, preview, and atomic ZIP output
 ├── mirror_service.py              # Allowlisted HTTP routes, LAN auth, Range, and audit
 ├── store_sources.py               # Store source health, retry, and fallback helpers
 ├── msstore_package_resolution.py  # Package selection and install ordering
