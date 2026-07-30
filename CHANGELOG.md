@@ -7,6 +7,9 @@ All notable changes to MSStoreHelper will be documented in this file.
 - Added one fail-closed package-ingress boundary for proxy metadata, downloads, persisted queues, cache/rollback records, App Installer and Intune staging, and GUI/CLI workflows.
 - Rejects traversal, Windows device names, alternate data streams, malformed package extensions, unsafe URL schemes and redirect downgrades, symlink escapes, and package paths outside their declared roots.
 - Passes install, signature-verification, and rollback package paths to PowerShell through process environment values instead of executable command text.
+- Added a hash-bound package trust report that requires valid Authenticode status, a valid Windows certificate chain, explicit revocation state, signed-manifest publisher/identity/version consistency, architecture/type sanity, and expected Store product or dependency binding.
+- Blocks untrusted or stale artifacts from install, rollback, shared cache, mirror, DISM, App Installer, and Intune promotion paths.
+- Added a queue quarantine and evidence-review dialog for otherwise-valid packages that lack an authoritative product binding; approved evidence is recorded in the local trust journal before automation is enabled.
 
 ## [v3.36.0] - 2026-07-29
 

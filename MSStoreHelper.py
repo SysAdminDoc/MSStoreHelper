@@ -42,7 +42,6 @@ from msstore_package_resolution import (
     package_version_tuple,
     package_role_label,
     select_recommended_packages,
-    signature_info_is_valid_microsoft,
     version_tuple_from_text,
 )
 from package_ingress import (
@@ -54,6 +53,18 @@ from package_ingress import (
     validate_package_record,
     validate_package_url,
     validate_response_redirects,
+)
+from package_trust import (
+    PackageTrustError,
+    TRUST_STATE_BLOCKED,
+    TRUST_STATE_REVIEW_REQUIRED,
+    blocked_trust_report,
+    evaluate_package_trust,
+    normalize_chain_status,
+    package_filename_metadata,
+    read_package_manifest,
+    review_trust_report,
+    trust_report_allows_automation,
 )
 from store_sources import (
     StoreSourceError,
@@ -149,6 +160,7 @@ APP_DATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), 
 USER_PROFILE_PATH = os.path.join(APP_DATA_DIR, "profile.json")
 REPAIR_BACKUP_DIR = os.path.join(APP_DATA_DIR, "RepairBackups")
 DOWNLOAD_STATE_PATH = os.path.join(APP_DATA_DIR, "download-state.json")
+TRUST_REVIEW_JOURNAL_PATH = os.path.join(APP_DATA_DIR, "trust-review.jsonl")
 
 try:
     IS_ADMIN = ctypes.windll.shell32.IsUserAnAdmin() != 0
@@ -510,6 +522,70 @@ class StoreAPI:
         return metadata
 
     @staticmethod
+    def expected_product_identities(product_id):
+        product_id = str(product_id or "").strip().lower()
+        if not product_id:
+            return set()
+        apps_by_name = {
+            app["Name"].lower(): app
+            for app in StoreAPI.catalog_apps()
+        }
+        expected = set()
+        for requirement in LTSC_COMPONENT_REQUIREMENTS:
+            app = apps_by_name.get(str(requirement.get("Name", "")).lower())
+            if not app or str(app.get("ProductId", "")).lower() != product_id:
+                continue
+            expected.update(
+                str(identity)
+                for identity in requirement.get("Identities", [])
+                if str(identity).strip()
+            )
+        for pin in XBOX_CORE_PACKAGE_PINS:
+            if (
+                str(pin.get("ProductId", "")).lower() == product_id
+                and pin.get("Identity")
+            ):
+                expected.add(str(pin["Identity"]))
+        return expected
+
+    @staticmethod
+    def attach_expected_trust_metadata(package, product_id=None):
+        package = package.copy()
+        query = package.get("StoreQuery") or {}
+        product_id = str(
+            product_id
+            or package.get("ExpectedProductId")
+            or query.get("ProductId")
+            or ""
+        ).strip()
+        if product_id:
+            package["ExpectedProductId"] = product_id
+
+        try:
+            filename_metadata = package_filename_metadata(package["FileName"])
+        except (KeyError, PackageTrustError):
+            return package
+        if not package.get("ExpectedPackageFamilyName"):
+            package["ExpectedPackageFamilyName"] = (
+                filename_metadata["PackageFamilyName"]
+            )
+        if "ExpectedDependency" not in package:
+            package["ExpectedDependency"] = is_dependency_package(package)
+
+        expected_identities = StoreAPI.expected_product_identities(product_id)
+        matching_identity = next(
+            (
+                identity
+                for identity in expected_identities
+                if identity.lower() == filename_metadata["Identity"].lower()
+            ),
+            None,
+        )
+        if matching_identity and not package.get("ExpectedPackageIdentity"):
+            package["ExpectedPackageIdentity"] = matching_identity
+        return package
+
+    @staticmethod
     def catalog_apps():
         apps = []
         for category_name, category in APP_CATALOG.items():
@@ -868,7 +944,13 @@ class StoreAPI:
                     "SizeBytes": None, "SizeStr": "—", "StoreQuery": query.copy(),
                     "SafeFileName": name,
                 }
-                results.append(annotate_package(package))
+                package = annotate_package(package)
+                results.append(
+                    StoreAPI.attach_expected_trust_metadata(
+                        package,
+                        query["ProductId"],
+                    )
+                )
             
             diagnostic = StoreAPI._source_diagnostic(
                 "RG-Adguard package proxy",
@@ -964,6 +1046,257 @@ class StoreAPI:
         return digest.hexdigest()
 
     @staticmethod
+    def query_package_signature(filepath):
+        package_path = validate_existing_package_path(
+            filepath,
+            require_file=True,
+        )
+        safe_module = POWERSHELL_SECURITY_MODULE.replace("'", "''")
+        command = f"""
+Import-Module '{safe_module}' -ErrorAction Stop
+$path = $env:MSSTOREHELPER_PACKAGE_PATH
+if ([string]::IsNullOrWhiteSpace($path)) {{ throw 'Package path is missing' }}
+$sig = Get-AuthenticodeSignature -FilePath $path
+$baseChainOk = $false
+$onlineChainOk = $false
+$rootSubject = ''
+$rootThumbprint = ''
+$baseStatuses = @()
+$onlineStatuses = @()
+$revocationState = 'failed'
+if ($sig.SignerCertificate) {{
+    $baseChain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+    $baseChain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+    $baseChain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
+    $baseChainOk = $baseChain.Build($sig.SignerCertificate)
+    $baseStatuses = @($baseChain.ChainStatus | ForEach-Object {{ $_.Status.ToString() }})
+    if ($baseChain.ChainElements.Count -gt 0) {{
+        $root = $baseChain.ChainElements[$baseChain.ChainElements.Count - 1].Certificate
+        $rootSubject = $root.Subject
+        $rootThumbprint = $root.Thumbprint
+    }}
+
+    $onlineChain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+    $onlineChain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::Online
+    $onlineChain.ChainPolicy.RevocationFlag = [System.Security.Cryptography.X509Certificates.X509RevocationFlag]::ExcludeRoot
+    $onlineChain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
+    $onlineChain.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds(5)
+    $onlineChainOk = $onlineChain.Build($sig.SignerCertificate)
+    $onlineStatuses = @($onlineChain.ChainStatus | ForEach-Object {{ $_.Status.ToString() }})
+    if ($onlineChainOk) {{
+        $revocationState = 'checked'
+    }} elseif ($baseChainOk -and $onlineStatuses.Count -gt 0) {{
+        $offlineOnly = $true
+        foreach ($status in $onlineStatuses) {{
+            if ($status -notin @('RevocationStatusUnknown', 'OfflineRevocation')) {{
+                $offlineOnly = $false
+            }}
+        }}
+        if ($offlineOnly) {{ $revocationState = 'offline' }}
+    }}
+}}
+[pscustomobject]@{{
+    Status = "$($sig.Status)"
+    StatusMessage = "$($sig.StatusMessage)"
+    Signer = if ($sig.SignerCertificate) {{ $sig.SignerCertificate.Subject }} else {{ '' }}
+    SignerThumbprint = if ($sig.SignerCertificate) {{ $sig.SignerCertificate.Thumbprint }} else {{ '' }}
+    Root = $rootSubject
+    RootThumbprint = $rootThumbprint
+    ChainValid = $baseChainOk
+    ChainStatus = @($baseStatuses + $onlineStatuses | Select-Object -Unique)
+    RevocationState = $revocationState
+}} | ConvertTo-Json -Compress -Depth 4
+"""
+        environment = os.environ.copy()
+        environment["MSSTOREHELPER_PACKAGE_PATH"] = package_path
+        result = subprocess.run(
+            [POWERSHELL_EXE, "-NoProfile", "-Command", command],
+            capture_output=True,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            env=environment,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            error = (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or "Signature inspection failed"
+            )
+            raise PackageTrustError(error)
+        try:
+            signature_info = json.loads(result.stdout.strip() or "{}")
+        except json.JSONDecodeError as exc:
+            raise PackageTrustError(
+                "Signature inspection returned invalid evidence"
+            ) from exc
+        if not isinstance(signature_info, dict):
+            raise PackageTrustError(
+                "Signature inspection returned invalid evidence"
+            )
+        signature_info["ChainStatus"] = normalize_chain_status(
+            signature_info.get("ChainStatus")
+        )
+        return signature_info
+
+    @staticmethod
+    def inspect_package_trust(
+        filepath,
+        package=None,
+        *,
+        signature_info=None,
+        evaluated_at=None,
+    ):
+        original_package = package
+        package = validate_package_record(
+            package or {
+                "FileName": os.path.basename(os.path.abspath(filepath)),
+            },
+            require_url=False,
+        )
+        package = StoreAPI.attach_expected_trust_metadata(package)
+        filepath = validate_existing_package_path(
+            filepath,
+            expected_filename=package["FileName"],
+            require_file=True,
+        )
+        artifact_sha256 = StoreAPI.file_sha256(filepath)
+
+        try:
+            if signature_info is None:
+                signature_info = StoreAPI.query_package_signature(filepath)
+            manifest = read_package_manifest(
+                filepath,
+                package["FileName"],
+            )
+            report = evaluate_package_trust(
+                package,
+                artifact_sha256,
+                signature_info,
+                manifest,
+                evaluated_at=evaluated_at,
+            )
+        except (
+            OSError,
+            PackageIngressError,
+            PackageTrustError,
+            subprocess.SubprocessError,
+            TypeError,
+        ) as exc:
+            report = blocked_trust_report(
+                package,
+                artifact_sha256,
+                str(exc),
+                signature_info=signature_info,
+                evaluated_at=evaluated_at,
+            )
+
+        if isinstance(package, dict):
+            package["TrustState"] = report["State"]
+            package["TrustReport"] = report
+            package["Sha256"] = artifact_sha256
+        if isinstance(original_package, dict):
+            original_package.update(package)
+        return report
+
+    @staticmethod
+    def package_trust_status(package, filepath, *, inspect_missing=True):
+        package = package if isinstance(package, dict) else {}
+        try:
+            filepath = validate_existing_package_path(
+                filepath,
+                expected_filename=package.get("FileName"),
+                require_file=True,
+            )
+            artifact_sha256 = StoreAPI.file_sha256(filepath)
+        except (OSError, PackageIngressError, TypeError) as exc:
+            return False, str(exc), None
+
+        report = package.get("TrustReport") if isinstance(package, dict) else None
+        if trust_report_allows_automation(report, artifact_sha256):
+            state = report.get("State", "trusted")
+            return True, f"Package trust state: {state}", report
+
+        report_hash_matches = (
+            isinstance(report, dict)
+            and str(report.get("ArtifactSha256", "")).lower()
+            == artifact_sha256.lower()
+        )
+        if inspect_missing and (
+            not isinstance(report, dict) or not report_hash_matches
+        ):
+            report = StoreAPI.inspect_package_trust(filepath, package)
+
+        state = (
+            report.get("State", TRUST_STATE_BLOCKED)
+            if isinstance(report, dict)
+            else TRUST_STATE_BLOCKED
+        )
+        reasons = ", ".join(
+            report.get("ReasonCodes", [])
+            if isinstance(report, dict)
+            else []
+        )
+        if state == TRUST_STATE_REVIEW_REQUIRED:
+            message = "Package is quarantined pending interactive trust review"
+        else:
+            message = "Package trust checks blocked automation"
+        if reasons:
+            message = f"{message}: {reasons}"
+        return False, message, report
+
+    @staticmethod
+    def review_package_trust(
+        package,
+        filepath,
+        *,
+        journal_path=TRUST_REVIEW_JOURNAL_PATH,
+        reviewer="interactive-user",
+        reviewed_at=None,
+    ):
+        filepath = validate_existing_package_path(
+            filepath,
+            expected_filename=package.get("FileName"),
+            require_file=True,
+        )
+        artifact_sha256 = StoreAPI.file_sha256(filepath)
+        reviewed = review_trust_report(
+            package.get("TrustReport"),
+            artifact_sha256,
+            reviewer=reviewer,
+            reviewed_at=reviewed_at,
+        )
+        event = {
+            "Event": "package-trust-promotion",
+            "RecordedAt": reviewed["Review"]["ReviewedAt"],
+            "ArtifactSha256": artifact_sha256,
+            "FileName": package["FileName"],
+            "Source": reviewed.get("Source", {}),
+            "Expected": reviewed.get("Expected", {}),
+            "Manifest": reviewed.get("Manifest", {}),
+            "Signature": reviewed.get("Signature", {}),
+            "Review": reviewed.get("Review", {}),
+        }
+        os.makedirs(os.path.dirname(os.path.abspath(journal_path)), exist_ok=True)
+        with open(journal_path, "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(event, sort_keys=True))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        promoted_package = package.copy()
+        promoted_package["TrustState"] = reviewed["State"]
+        promoted_package["TrustReport"] = reviewed
+        promoted_package["Sha256"] = artifact_sha256
+        StoreAPI.write_artifact_manifest(
+            promoted_package,
+            filepath,
+            os.path.dirname(filepath),
+        )
+        package.update(promoted_package)
+        return reviewed
+
+    @staticmethod
     def artifact_metadata(package, artifact_path, source_url=None):
         filename = validate_package_filename(
             package.get("FileName") or os.path.basename(artifact_path)
@@ -986,6 +1319,16 @@ class StoreAPI:
             "PackageIdentity": package_identity(filename),
             "AvailableVersion": format_version_tuple(package_version_tuple(filename)),
         }
+        for key in (
+            "ExpectedProductId",
+            "ExpectedPackageIdentity",
+            "ExpectedPackageFamilyName",
+            "ExpectedDependency",
+            "TrustState",
+            "TrustReport",
+        ):
+            if key in package:
+                metadata[key] = package.get(key)
         if package.get("PackageRoleLabel"):
             metadata["PackageRoleLabel"] = package.get("PackageRoleLabel")
         if package.get("StoreQuery"):
@@ -995,6 +1338,10 @@ class StoreAPI:
                 query.get("Language"),
                 query.get("Market"),
             )
+            if query.get("ProductId"):
+                metadata["StoreQuery"]["ProductId"] = str(
+                    query["ProductId"]
+                ).strip()
         return metadata
 
     @staticmethod
@@ -1009,16 +1356,23 @@ class StoreAPI:
                 data = json.load(handle)
             if isinstance(data, dict) and isinstance(data.get("Artifacts"), dict):
                 data.setdefault("History", {})
+                data.setdefault("Quarantine", {})
                 return data
         except Exception:
             pass
-        return {"Version": 2, "Artifacts": {}, "History": {}}
+        return {
+            "Version": 2,
+            "Artifacts": {},
+            "History": {},
+            "Quarantine": {},
+        }
 
     @staticmethod
     def save_cache_manifest(folder, manifest):
         os.makedirs(folder, exist_ok=True)
         manifest.setdefault("Artifacts", {})
         manifest.setdefault("History", {})
+        manifest.setdefault("Quarantine", {})
         manifest["Version"] = 2
         manifest["UpdatedAt"] = datetime.now(timezone.utc).isoformat()
         with open(StoreAPI._manifest_path(folder), "w", encoding="utf-8") as handle:
@@ -1103,8 +1457,31 @@ class StoreAPI:
         metadata = StoreAPI.artifact_metadata(package, artifact_path, source_url)
         metadata["CachedAt"] = datetime.now(timezone.utc).isoformat()
         manifest = StoreAPI.load_cache_manifest(folder)
-        manifest["Artifacts"][metadata["FileName"]] = metadata
-        pruned = StoreAPI._record_cache_history(manifest, metadata)
+        filename = metadata["FileName"]
+        trusted = trust_report_allows_automation(
+            metadata.get("TrustReport"),
+            metadata["Sha256"],
+        )
+        pruned = []
+        if trusted:
+            manifest["Quarantine"].pop(filename, None)
+            manifest["Artifacts"][filename] = metadata
+            pruned = StoreAPI._record_cache_history(manifest, metadata)
+        else:
+            manifest["Artifacts"].pop(filename, None)
+            manifest["Quarantine"][filename] = metadata
+            identity = str(
+                metadata.get("PackageIdentity")
+                or package_identity(filename)
+            ).lower()
+            if identity in manifest["History"]:
+                manifest["History"][identity] = [
+                    item
+                    for item in manifest["History"][identity]
+                    if item.get("FileName") != filename
+                ]
+                if not manifest["History"][identity]:
+                    manifest["History"].pop(identity, None)
         StoreAPI.save_cache_manifest(folder, manifest)
         StoreAPI._remove_cache_artifacts(folder, pruned)
         package["LocalPath"] = artifact_path
@@ -1142,6 +1519,9 @@ class StoreAPI:
             "FileName", "PackageIdentity", "PackageRoleLabel", "Architecture", "FileType",
             "IsBundle", "IsEncrypted", "SizeBytes", "SizeStr", "Sha256", "AvailableVersion",
             "LocalPath", "CacheManifest", "StoreQuery", "DownloadStatus", "LastError",
+            "ExpectedProductId", "ExpectedPackageIdentity",
+            "ExpectedPackageFamilyName", "ExpectedDependency",
+            "TrustState", "TrustReport",
             "UpdateSourceApp", "UpdateInstalledIdentity", "UpdateInstalledVersion",
             "UpdateAvailableVersion",
         ]
@@ -1161,6 +1541,9 @@ class StoreAPI:
             "SizeBytes", "SizeStr", "Sha256", "AvailableVersion", "PackageRole",
             "PackageRoleLabel", "InstallOrder", "PackageIdentity", "LocalPath",
             "CacheManifest", "StoreQuery", "DownloadStatus", "LastError",
+            "ExpectedProductId", "ExpectedPackageIdentity",
+            "ExpectedPackageFamilyName", "ExpectedDependency",
+            "TrustState", "TrustReport",
             "UpdateSourceApp", "UpdateInstalledIdentity", "UpdateInstalledVersion",
             "UpdateAvailableVersion",
         ]
@@ -1337,7 +1720,13 @@ class StoreAPI:
                 package.update(validated_package)
             if package is not None and StoreAPI.cached_artifact_is_valid(filepath, package):
                 package["LocalPath"] = filepath
-                return True, "Already downloaded"
+                trust_ok, trust_message, _report = StoreAPI.package_trust_status(
+                    package,
+                    filepath,
+                )
+                if trust_ok:
+                    return True, f"Already downloaded; {trust_message}"
+                return False, trust_message
 
             existing = os.path.getsize(part_path) if os.path.exists(part_path) else 0
             headers = {"Range": f"bytes={existing}-"} if existing else None
@@ -1370,9 +1759,36 @@ class StoreAPI:
                     return False, f"Downloaded {downloaded} bytes; expected {total} bytes"
 
             os.replace(part_path, filepath)
-            if package is not None:
-                StoreAPI.write_artifact_manifest(package, filepath, source_url=url)
-            return True, "Success"
+            trust_package = package or {
+                "FileName": filename,
+                "Url": url,
+            }
+            report = StoreAPI.inspect_package_trust(
+                filepath,
+                trust_package,
+            )
+            StoreAPI.write_artifact_manifest(
+                trust_package,
+                filepath,
+                source_url=url,
+            )
+            if report.get("AutomationAllowed") is True:
+                return True, (
+                    "Success; package trust verified"
+                    if report.get("State") == "trusted"
+                    else "Success; reviewed package trust verified"
+                )
+            if report.get("State") == TRUST_STATE_REVIEW_REQUIRED:
+                return False, (
+                    "Downloaded package is quarantined pending interactive "
+                    "trust review"
+                )
+            reasons = ", ".join(report.get("ReasonCodes", []))
+            return False, (
+                f"Downloaded package failed trust checks: {reasons}"
+                if reasons
+                else "Downloaded package failed trust checks"
+            )
         except Exception as e:
             return False, str(e)
 
@@ -1402,6 +1818,14 @@ class StoreAPI:
         filename = package["FileName"]
         if not os.path.exists(local_path):
             return False, "Downloaded file is missing"
+        trust_ok, trust_message, _report = StoreAPI.package_trust_status(
+            package,
+            local_path,
+        )
+        if isinstance(original_package, dict):
+            original_package.update(package)
+        if not trust_ok:
+            return False, trust_message
         try:
             os.makedirs(cache_path, exist_ok=True)
             destination = confined_package_path(cache_path, filename)
@@ -1456,10 +1880,15 @@ class StoreAPI:
             if not StoreAPI.is_cacheable_artifact(filename):
                 continue
             metadata = artifacts.get(filename, {}).copy()
-            if metadata and not StoreAPI.cached_artifact_is_valid(path, metadata):
+            if not metadata or not StoreAPI.cached_artifact_is_valid(path, metadata):
                 continue
-            if not metadata:
-                metadata = StoreAPI.artifact_metadata({"FileName": filename}, path)
+            trust_ok, _trust_message, _report = StoreAPI.package_trust_status(
+                metadata,
+                path,
+                inspect_missing=False,
+            )
+            if not trust_ok:
+                continue
 
             key = filename.lower()
             if key in seen:
@@ -1596,7 +2025,21 @@ class StoreAPI:
                     metadata["Path"] = metadata_path
                     metadata["CacheFolder"] = folder
                     key = (metadata["PackageIdentity"].lower(), metadata["FileName"].lower(), os.path.abspath(metadata["Path"]).lower())
-                    if key in seen or not StoreAPI.cached_artifact_is_valid(metadata["Path"], metadata):
+                    trust_ok, _trust_message, _report = (
+                        StoreAPI.package_trust_status(
+                            metadata,
+                            metadata["Path"],
+                            inspect_missing=False,
+                        )
+                    )
+                    if (
+                        key in seen
+                        or not StoreAPI.cached_artifact_is_valid(
+                            metadata["Path"],
+                            metadata,
+                        )
+                        or not trust_ok
+                    ):
                         continue
                     seen.add(key)
                     entries.append(metadata)
@@ -1648,7 +2091,7 @@ class StoreAPI:
         return candidates
 
     @staticmethod
-    def rollback_package(package_identity_name, artifact_path):
+    def rollback_package(package_identity_name, artifact_path, package=None):
         try:
             package_path = validate_existing_package_path(
                 artifact_path,
@@ -1659,6 +2102,16 @@ class StoreAPI:
         identity = str(package_identity_name or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", identity):
             return False, "Rollback package identity is invalid"
+        trust_package = package or {
+            "FileName": os.path.basename(package_path),
+            "ExpectedPackageIdentity": identity,
+        }
+        trust_ok, trust_message, _report = StoreAPI.package_trust_status(
+            trust_package,
+            package_path,
+        )
+        if not trust_ok:
+            return False, trust_message
 
         cmd = "\n".join([
             "$ErrorActionPreference = 'Stop'",
@@ -2209,11 +2662,25 @@ class StoreAPI:
         package = validate_package_record(package, require_url=False)
         filename = package["FileName"]
         if package.get("LocalPath"):
-            return validate_existing_package_path(
+            source_path = validate_existing_package_path(
                 package["LocalPath"],
                 expected_filename=filename,
+                require_file=True,
             )
-        return confined_package_path(output_path, filename)
+        else:
+            source_path = validate_existing_package_path(
+                confined_package_path(output_path, filename),
+                expected_filename=filename,
+                root=output_path,
+                require_file=True,
+            )
+        trust_ok, trust_message, _report = StoreAPI.package_trust_status(
+            package,
+            source_path,
+        )
+        if not trust_ok:
+            raise ValueError(trust_message)
+        return source_path
 
     @staticmethod
     def _intune_package_records(packages, output_path, target_arch=SYSTEM_ARCH):
@@ -2468,12 +2935,21 @@ class StoreAPI:
         return generated, detection_sidecar, source_info["PackageCount"]
 
     @staticmethod
-    def install_package(filepath):
+    def install_package(filepath, package=None):
         try:
             package_path = validate_existing_package_path(
                 filepath,
                 require_file=True,
             )
+            trust_package = package or {
+                "FileName": os.path.basename(package_path),
+            }
+            trust_ok, trust_message, _report = StoreAPI.package_trust_status(
+                trust_package,
+                package_path,
+            )
+            if not trust_ok:
+                return False, trust_message
             cmd = "\n".join([
                 "$ErrorActionPreference = 'Stop'",
                 "$path = $env:MSSTOREHELPER_PACKAGE_PATH",
@@ -2499,62 +2975,20 @@ class StoreAPI:
             return False, str(e)
 
     @staticmethod
-    def verify_package_signature(filepath):
+    def verify_package_signature(filepath, package=None):
         try:
             package_path = validate_existing_package_path(
                 filepath,
                 require_file=True,
             )
-            safe_module = POWERSHELL_SECURITY_MODULE.replace("'", "''")
-            cmd = f"""
-Import-Module '{safe_module}' -ErrorAction Stop
-$path = $env:MSSTOREHELPER_PACKAGE_PATH
-if ([string]::IsNullOrWhiteSpace($path)) {{ throw 'Package path is missing' }}
-$sig = Get-AuthenticodeSignature -FilePath $path
-$chainOk = $false
-$rootSubject = ''
-$rootThumbprint = ''
-if ($sig.SignerCertificate) {{
-    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
-    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
-    $chainOk = $chain.Build($sig.SignerCertificate)
-    if ($chain.ChainElements.Count -gt 0) {{
-        $root = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate
-        $rootSubject = $root.Subject
-        $rootThumbprint = $root.Thumbprint
-    }}
-}}
-[pscustomobject]@{{
-    Status = "$($sig.Status)"
-    StatusMessage = "$($sig.StatusMessage)"
-    Signer = if ($sig.SignerCertificate) {{ $sig.SignerCertificate.Subject }} else {{ '' }}
-    Root = $rootSubject
-    RootThumbprint = $rootThumbprint
-    ChainValid = $chainOk
-}} | ConvertTo-Json -Compress
-"""
-            environment = os.environ.copy()
-            environment["MSSTOREHELPER_PACKAGE_PATH"] = package_path
-            result = subprocess.run(
-                [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
-                capture_output=True,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                env=environment,
+            trust_package = package or {
+                "FileName": os.path.basename(package_path),
+            }
+            trust_ok, trust_message, _report = StoreAPI.package_trust_status(
+                trust_package,
+                package_path,
             )
-            if result.returncode != 0:
-                error_msg = result.stderr.strip() or result.stdout.strip() or "Signature check failed"
-                return False, error_msg
-
-            signature_info = json.loads(result.stdout.strip() or "{}")
-            if signature_info_is_valid_microsoft(signature_info):
-                root = signature_info.get("Root", "Microsoft root")
-                return True, f"{signature_info.get('Status', 'Valid')} signature via {root}"
-
-            status = signature_info.get("Status", "Unknown")
-            signer = signature_info.get("Signer", "unknown signer") or "unknown signer"
-            root = signature_info.get("Root", "unknown root") or "unknown root"
-            return False, f"{status} signature from {signer} via {root}"
+            return trust_ok, trust_message
         except Exception as e:
             return False, str(e)
 
@@ -3101,7 +3535,7 @@ class PackageRow(ctk.CTkFrame):
 
 
 class QueueItem(ctk.CTkFrame):
-    def __init__(self, master, pkg_info):
+    def __init__(self, master, pkg_info, review_callback=None):
         super().__init__(master, fg_color=Theme.BG_ELEVATED, corner_radius=5, border_width=1, border_color=Theme.BORDER_SUBTLE)
         
         self.pkg_info = pkg_info
@@ -3124,6 +3558,8 @@ class QueueItem(ctk.CTkFrame):
         status = pkg_info.get("DownloadStatus") or "Pending"
         status_colors = {
             "Downloaded": Theme.SUCCESS,
+            "Quarantined": Theme.WARNING,
+            "TrustBlocked": Theme.DANGER,
             "Partial": Theme.WARNING,
             "Failed": Theme.DANGER,
             "Downloading": Theme.INFO,
@@ -3131,6 +3567,8 @@ class QueueItem(ctk.CTkFrame):
         }
         status_text = {
             "Downloaded": "✅ Done",
+            "Quarantined": "Review required",
+            "TrustBlocked": "Trust blocked",
             "Partial": "Partial",
             "Failed": "❌ Failed",
             "Downloading": "Downloading...",
@@ -3138,6 +3576,25 @@ class QueueItem(ctk.CTkFrame):
         }.get(status, "Waiting")
         self.status_lbl = ctk.CTkLabel(info_frame, text=status_text, font=("Segoe UI", 10), text_color=status_colors.get(status, Theme.TEXT_MUTED))
         self.status_lbl.pack(side="right")
+
+        if (
+            review_callback
+            and pkg_info.get("TrustState") == TRUST_STATE_REVIEW_REQUIRED
+            and pkg_info.get("LocalPath")
+        ):
+            ctk.CTkButton(
+                info_frame,
+                text="Review",
+                width=58,
+                height=24,
+                font=("Segoe UI Semibold", 10),
+                fg_color="transparent",
+                text_color=Theme.WARNING,
+                border_width=1,
+                border_color=Theme.WARNING,
+                hover_color=Theme.BG_CARD_HOVER,
+                command=lambda: review_callback(pkg_info),
+            ).pack(side="right", padx=(0, 8))
         
         pkg_info['_status_widget'] = self.status_lbl
 
@@ -4966,10 +5423,142 @@ Fixes "needs to be online" and similar errors.
             ).pack(expand=True, pady=32)
         else:
             for pkg in self.download_queue:
-                QueueItem(self.queue_scroll, pkg).pack(fill="x", pady=3, padx=5)
+                QueueItem(
+                    self.queue_scroll,
+                    pkg,
+                    self._review_package_trust,
+                ).pack(fill="x", pady=3, padx=5)
         
         count = len(self.download_queue)
         self.queue_count.configure(text=f"{count} {'item' if count == 1 else 'items'}")
+
+    def _review_package_trust(self, package):
+        report = package.get("TrustReport") or {}
+        path = package.get("LocalPath")
+        if (
+            report.get("State") != TRUST_STATE_REVIEW_REQUIRED
+            or report.get("ReviewEligible") is not True
+            or not path
+        ):
+            self._update_status("Package is not eligible for review", Theme.WARNING)
+            self._log("WARNING", "Only identity-valid packages missing authoritative product binding can be reviewed")
+            return
+
+        source = report.get("Source") or {}
+        manifest = report.get("Manifest") or {}
+        signature = report.get("Signature") or {}
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Review quarantined package")
+        dialog.geometry("720x570")
+        dialog.minsize(620, 500)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        content = ctk.CTkFrame(dialog, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=24, pady=22)
+        ctk.CTkLabel(
+            content,
+            text="Review quarantined package",
+            font=("Segoe UI Semibold", 20),
+            anchor="w",
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            content,
+            text=(
+                "Windows signature and manifest checks passed, but the Store "
+                "product could not be bound to an authoritative package identity."
+            ),
+            font=("Segoe UI", 11),
+            text_color=Theme.TEXT_MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=430,
+        ).pack(fill="x", pady=(4, 14))
+
+        evidence = "\n".join([
+            f"File: {package.get('FileName', '')}",
+            f"Source: {source.get('Url') or 'not supplied'}",
+            f"Store product: {source.get('ProductId') or 'not supplied'}",
+            f"Identity: {manifest.get('Identity') or 'missing'}",
+            f"Package family: {manifest.get('PackageFamilyName') or 'missing'}",
+            f"Publisher: {manifest.get('Publisher') or 'missing'}",
+            f"Manifest: {manifest.get('ManifestPath') or 'missing'}",
+            f"Version / architecture: {manifest.get('Version') or 'missing'} / {manifest.get('Architecture') or 'missing'}",
+            f"Signature chain: {'valid' if signature.get('ChainValid') else 'invalid'}",
+            f"Revocation: {signature.get('RevocationState') or 'unknown'}",
+            f"SHA-256: {report.get('ArtifactSha256') or 'missing'}",
+        ])
+        evidence_box = ctk.CTkTextbox(
+            content,
+            height=150,
+            font=("Consolas", 10),
+            fg_color=Theme.BG_INPUT,
+            text_color=Theme.TEXT_SECONDARY,
+            wrap="char",
+        )
+        evidence_box.pack(fill="x")
+        evidence_box.insert("1.0", evidence)
+        evidence_box.configure(state="disabled")
+
+        ctk.CTkLabel(
+            content,
+            text=(
+                "Approving records this evidence in the local trust journal "
+                "and enables cache, mirror, export, rollback, and install automation."
+            ),
+            font=("Segoe UI Semibold", 10),
+            text_color=Theme.WARNING,
+            anchor="w",
+            justify="left",
+            wraplength=430,
+        ).pack(fill="x", pady=(12, 8))
+
+        actions = ctk.CTkFrame(content, fg_color="transparent")
+        actions.pack(fill="x")
+
+        def approve():
+            try:
+                StoreAPI.review_package_trust(package, path)
+            except Exception as exc:
+                self._update_status("Package trust review failed", Theme.DANGER)
+                self._log("ERROR", f"Package trust review failed: {exc}")
+                return
+            package["DownloadStatus"] = "Downloaded"
+            package.pop("LastError", None)
+            self._save_download_state()
+            dialog.destroy()
+            self._update_queue_ui()
+            self._update_status("Package trust review recorded", Theme.SUCCESS)
+            self._log(
+                "SUCCESS",
+                (
+                    f"Promoted reviewed package {package.get('FileName')} "
+                    f"and recorded {TRUST_REVIEW_JOURNAL_PATH}"
+                ),
+            )
+
+        ctk.CTkButton(
+            actions,
+            text="Cancel",
+            width=96,
+            height=34,
+            fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=dialog.destroy,
+        ).pack(side="left")
+        ctk.CTkButton(
+            actions,
+            text="Approve package",
+            width=136,
+            height=34,
+            font=("Segoe UI Semibold", 11),
+            fg_color=Theme.WARNING,
+            hover_color=Theme.PRIMARY_HOVER,
+            command=approve,
+        ).pack(side="left", padx=(8, 0))
 
     def _save_download_state(self):
         if self.download_queue or os.path.abspath(self.output_path) != os.path.abspath(DEFAULT_OUTPUT):
@@ -5159,6 +5748,7 @@ Fixes "needs to be online" and similar errors.
         
         total = len(self.download_queue)
         success_count = 0
+        queue_ui_refresh_needed = False
         
         for i, pkg in enumerate(self.download_queue):
             try:
@@ -5205,14 +5795,30 @@ Fixes "needs to be online" and similar errors.
                         level = "SUCCESS" if cache_success else "WARNING"
                         self.after(0, lambda lvl=level, m=cache_msg: self._log(lvl, f"  Shared cache: {m}"))
                 else:
-                    pkg["DownloadStatus"] = "Partial" if os.path.exists(f"{filepath}.part") else "Failed"
+                    if pkg.get("TrustState") == TRUST_STATE_REVIEW_REQUIRED:
+                        pkg["DownloadStatus"] = "Quarantined"
+                        queue_ui_refresh_needed = True
+                    elif pkg.get("TrustState") == TRUST_STATE_BLOCKED:
+                        pkg["DownloadStatus"] = "TrustBlocked"
+                    else:
+                        pkg["DownloadStatus"] = "Partial" if os.path.exists(f"{filepath}.part") else "Failed"
                     pkg["LastError"] = error_msg
                     self._save_download_state()
-                    status_text = "Partial" if pkg["DownloadStatus"] == "Partial" else "❌ Failed"
-                    status_color = Theme.WARNING if pkg["DownloadStatus"] == "Partial" else Theme.DANGER
+                    status_text = {
+                        "Quarantined": "Review required",
+                        "TrustBlocked": "Trust blocked",
+                        "Partial": "Partial",
+                    }.get(pkg["DownloadStatus"], "❌ Failed")
+                    status_color = (
+                        Theme.WARNING
+                        if pkg["DownloadStatus"] in {"Partial", "Quarantined"}
+                        else Theme.DANGER
+                    )
                     self.after(0, lambda w=pkg['_status_widget'], t=status_text, c=status_color: w.configure(text=t, text_color=c))
                     self.after(0, lambda n=fname, e=error_msg: self._log("ERROR", f"  Failed to download {n}: {e}"))
-        
+
+        if queue_ui_refresh_needed:
+            self.after(0, self._update_queue_ui)
         self.after(0, lambda: self._update_progress(0))
         self.after(0, lambda: self._update_status("✅ Downloads complete!", Theme.SUCCESS))
         self.after(0, lambda: self._log("SUCCESS", f"Download complete: {success_count}/{total} files successful"))
@@ -5360,12 +5966,19 @@ Fixes "needs to be online" and similar errors.
             self.after(0, lambda i=identity, v=version: self._update_status(f"Rolling back {i} to {v}...", Theme.INFO))
             self.after(0, lambda i=identity, c=current, v=version, p=path: self._log("INFO", f"Rollback candidate for {i}: current={c}, rollback={v}, path={p}"))
 
-            signature_ok, signature_msg = StoreAPI.verify_package_signature(path)
+            signature_ok, signature_msg = StoreAPI.verify_package_signature(
+                path,
+                candidate,
+            )
             if not signature_ok:
                 self.after(0, lambda i=identity, m=signature_msg: self._log("ERROR", f"Rollback signature check blocked {i}: {m}"))
                 continue
 
-            success, message = StoreAPI.rollback_package(identity, path)
+            success, message = StoreAPI.rollback_package(
+                identity,
+                path,
+                candidate,
+            )
             if success:
                 success_count += 1
                 self.after(0, lambda i=identity, v=version: self._log("SUCCESS", f"Rolled back {i} to {v}"))
@@ -5429,7 +6042,10 @@ Fixes "needs to be online" and similar errors.
                 self.after(0, lambda n=package_name, i=installed_version, a=available_version: self._log("SUCCESS", f"  Skipped {n}: installed {i} >= available {a}"))
                 continue
 
-            signature_ok, signature_msg = StoreAPI.verify_package_signature(filepath)
+            signature_ok, signature_msg = StoreAPI.verify_package_signature(
+                filepath,
+                pkg,
+            )
             if not signature_ok:
                 if '_status_widget' in pkg:
                     self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Signature blocked", text_color=Theme.DANGER))
@@ -5438,7 +6054,7 @@ Fixes "needs to be online" and similar errors.
 
             self.after(0, lambda m=signature_msg: self._log("DEBUG", f"  Signature verified: {m}"))
             
-            success, error_msg = StoreAPI.install_package(filepath)
+            success, error_msg = StoreAPI.install_package(filepath, pkg)
             
             if '_status_widget' in pkg:
                 if success:
@@ -5686,6 +6302,7 @@ def _cli_emit_summary(summary, as_json, stdout):
 
 
 def _cli_package_record(package, status, message="", path=None):
+    trust_report = package.get("TrustReport") or {}
     return {
         "FileName": package.get("FileName", ""),
         "PackageIdentity": package.get("PackageIdentity") or package_identity(package.get("FileName", "")),
@@ -5695,6 +6312,9 @@ def _cli_package_record(package, status, message="", path=None):
         "Status": status,
         "Message": message,
         "LocalPath": path or package.get("LocalPath", ""),
+        "TrustState": package.get("TrustState", ""),
+        "TrustReviewEligible": trust_report.get("ReviewEligible", False),
+        "TrustReasonCodes": list(trust_report.get("ReasonCodes") or []),
     }
 
 
@@ -5755,7 +6375,11 @@ def _cli_download_selected(packages, output_path, stderr):
             records.append(_cli_package_record(package, "downloaded", message, path))
         else:
             _cli_print(f"download failed: {filename}: {message}", stderr)
-            records.append(_cli_package_record(package, "failed", message, path))
+            status = {
+                TRUST_STATE_REVIEW_REQUIRED: "quarantined",
+                TRUST_STATE_BLOCKED: "trust-blocked",
+            }.get(package.get("TrustState"), "failed")
+            records.append(_cli_package_record(package, status, message, path))
     return downloaded, records
 
 
@@ -5789,14 +6413,17 @@ def _cli_install_downloaded(packages, records, stderr):
             _cli_set_package_record(records, package, "skipped", f"installed {installed_version} is current", local_path)
             continue
 
-        signature_ok, signature_message = StoreAPI.verify_package_signature(local_path)
+        signature_ok, signature_message = StoreAPI.verify_package_signature(
+            local_path,
+            package,
+        )
         if not signature_ok:
             failed_count += 1
             _cli_print(f"signature blocked: {package.get('FileName')}: {signature_message}", stderr)
             _cli_set_package_record(records, package, "failed", f"signature blocked: {signature_message}", local_path)
             continue
 
-        ok, install_message = StoreAPI.install_package(local_path)
+        ok, install_message = StoreAPI.install_package(local_path, package)
         if ok:
             success_count += 1
             _cli_set_package_record(records, package, "installed", install_message, local_path)

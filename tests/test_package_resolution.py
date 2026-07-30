@@ -104,19 +104,29 @@ class PackageResolutionTests(unittest.TestCase):
     def test_signature_info_requires_valid_microsoft_signature(self):
         self.assertTrue(signature_info_is_valid_microsoft({
             "Status": "Valid",
-            "ChainValid": False,
+            "ChainValid": True,
+            "RevocationState": "checked",
             "Signer": "CN=Microsoft Corporation",
             "Root": "CN=Microsoft Root Certificate Authority 2011",
         }))
         self.assertFalse(signature_info_is_valid_microsoft({
             "Status": "Valid",
+            "ChainValid": False,
+            "RevocationState": "checked",
+            "Signer": "CN=Microsoft Corporation",
+            "Root": "CN=Not Microsoft Test Root",
+        }))
+        self.assertFalse(signature_info_is_valid_microsoft({
+            "Status": "Valid",
             "ChainValid": True,
+            "RevocationState": "checked",
             "Signer": "CN=Contoso",
             "Root": "CN=Contoso Root",
         }))
         self.assertFalse(signature_info_is_valid_microsoft({
             "Status": "HashMismatch",
             "ChainValid": True,
+            "RevocationState": "checked",
             "Signer": "CN=Microsoft Corporation",
             "Root": "CN=Microsoft Root Certificate Authority 2011",
         }))

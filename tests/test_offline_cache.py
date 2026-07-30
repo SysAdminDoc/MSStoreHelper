@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from MSStoreHelper import StoreAPI
+from test_trust_utils import inspect_as_trusted, mark_package_trusted
 
 
 class FakeDownloadResponse:
@@ -44,10 +45,15 @@ class OfflineCacheTests(unittest.TestCase):
             with open(source, "wb") as handle:
                 handle.write(b"package")
 
-            ok, message = StoreAPI.cache_downloaded_artifact({
+            package = {
                 "FileName": os.path.basename(source),
                 "LocalPath": source,
-            }, cache_dir)
+            }
+            mark_package_trusted(package, source)
+            ok, message = StoreAPI.cache_downloaded_artifact(
+                package,
+                cache_dir,
+            )
 
             self.assertTrue(ok)
             self.assertIn("Cached:", message)
@@ -66,10 +72,15 @@ class OfflineCacheTests(unittest.TestCase):
             with open(destination, "wb") as handle:
                 handle.write(b"cached!")
 
-            ok, message = StoreAPI.cache_downloaded_artifact({
+            package = {
                 "FileName": os.path.basename(source),
                 "LocalPath": source,
-            }, cache_dir)
+            }
+            mark_package_trusted(package, source)
+            ok, message = StoreAPI.cache_downloaded_artifact(
+                package,
+                cache_dir,
+            )
 
             self.assertTrue(ok)
             self.assertIn("Cached:", message)
@@ -94,11 +105,16 @@ class OfflineCacheTests(unittest.TestCase):
             with open(destination, "wb") as handle:
                 handle.write(b"package")
 
-            StoreAPI.write_artifact_manifest({"FileName": os.path.basename(source)}, destination, cache_dir)
-            ok, message = StoreAPI.cache_downloaded_artifact({
+            package = {
                 "FileName": os.path.basename(source),
                 "LocalPath": source,
-            }, cache_dir)
+            }
+            mark_package_trusted(package, source)
+            StoreAPI.write_artifact_manifest(package, destination, cache_dir)
+            ok, message = StoreAPI.cache_downloaded_artifact(
+                package,
+                cache_dir,
+            )
 
             self.assertTrue(ok)
             self.assertIn("Already cached:", message)
@@ -124,7 +140,9 @@ class OfflineCacheTests(unittest.TestCase):
                 path = os.path.join(cache_dir, f"Contoso.App_{version}_x64__test.msixbundle")
                 with open(path, "wb") as handle:
                     handle.write(version.encode("ascii"))
-                StoreAPI.write_artifact_manifest({"FileName": os.path.basename(path)}, path, cache_dir)
+                package = {"FileName": os.path.basename(path)}
+                mark_package_trusted(package, path)
+                StoreAPI.write_artifact_manifest(package, path, cache_dir)
                 paths.append(path)
 
             manifest = StoreAPI.load_cache_manifest(cache_dir)
@@ -142,7 +160,9 @@ class OfflineCacheTests(unittest.TestCase):
                 path = os.path.join(cache_dir, f"Contoso.App_{version}_x64__test.msixbundle")
                 with open(path, "wb") as handle:
                     handle.write(version.encode("ascii"))
-                StoreAPI.write_artifact_manifest({"FileName": os.path.basename(path)}, path, cache_dir)
+                package = {"FileName": os.path.basename(path)}
+                mark_package_trusted(package, path)
+                StoreAPI.write_artifact_manifest(package, path, cache_dir)
 
             candidates = StoreAPI.rollback_candidates(
                 [cache_dir],
@@ -160,7 +180,9 @@ class OfflineCacheTests(unittest.TestCase):
                 path = os.path.join(cache_dir, f"Contoso.App_{version}_x64__test.msixbundle")
                 with open(path, "wb") as handle:
                     handle.write(version.encode("ascii"))
-                StoreAPI.write_artifact_manifest({"FileName": os.path.basename(path)}, path, cache_dir)
+                package = {"FileName": os.path.basename(path)}
+                mark_package_trusted(package, path)
+                StoreAPI.write_artifact_manifest(package, path, cache_dir)
 
             candidates = StoreAPI.rollback_candidates([cache_dir], ["Contoso.App"], {})
 
@@ -171,13 +193,19 @@ class OfflineCacheTests(unittest.TestCase):
             package_path = os.path.join(temp_dir, "Contoso.App_1.0.0.0_x64__test.msixbundle")
             with open(package_path, "wb") as handle:
                 handle.write(b"package")
+            package = {"FileName": os.path.basename(package_path)}
+            mark_package_trusted(package, package_path)
 
             with patch("MSStoreHelper.subprocess.run") as run_mock:
                 run_mock.return_value.returncode = 0
                 run_mock.return_value.stdout = "rollback ok"
                 run_mock.return_value.stderr = ""
 
-                ok, message = StoreAPI.rollback_package("Contoso.App", package_path)
+                ok, message = StoreAPI.rollback_package(
+                    "Contoso.App",
+                    package_path,
+                    package,
+                )
 
             self.assertTrue(ok, message)
             command = run_mock.call_args.args[0][-1]
@@ -200,7 +228,8 @@ class OfflineCacheTests(unittest.TestCase):
             package = {"FileName": os.path.basename(target), "Url": "https://example.invalid/app.msix"}
 
             with patch("MSStoreHelper.requests.get", return_value=FakeDownloadResponse([b"pack", b"age"], content_length=7)):
-                ok, message = StoreAPI.download_file(package["Url"], target, package=package)
+                with patch.object(StoreAPI, "inspect_package_trust", side_effect=inspect_as_trusted):
+                    ok, message = StoreAPI.download_file(package["Url"], target, package=package)
 
             self.assertTrue(ok, message)
             self.assertFalse(os.path.exists(f"{target}.part"))
@@ -227,7 +256,8 @@ class OfflineCacheTests(unittest.TestCase):
                 )
 
             with patch("MSStoreHelper.requests.get", side_effect=fake_get):
-                ok, message = StoreAPI.download_file("https://example.invalid/app.msix", target)
+                with patch.object(StoreAPI, "inspect_package_trust", side_effect=inspect_as_trusted):
+                    ok, message = StoreAPI.download_file("https://example.invalid/app.msix", target)
 
             self.assertTrue(ok, message)
             self.assertEqual(captured["headers"], {"Range": "bytes=4-"})
@@ -245,12 +275,16 @@ class OfflineCacheTests(unittest.TestCase):
                 "SizeBytes": 7,
                 "Sha256": StoreAPI.file_sha256(target),
             }
+            mark_package_trusted(package, target)
 
             with patch("MSStoreHelper.requests.get") as get_mock:
                 ok, message = StoreAPI.download_file("https://example.invalid/app.msix", target, package=package)
 
             self.assertTrue(ok, message)
-            self.assertEqual(message, "Already downloaded")
+            self.assertEqual(
+                message,
+                "Already downloaded; Package trust state: trusted",
+            )
             get_mock.assert_not_called()
 
     def test_download_file_keeps_part_file_on_failure(self):

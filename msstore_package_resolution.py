@@ -159,14 +159,28 @@ def installed_version_satisfies_package(package, installed_version):
 
 def signature_info_is_valid_microsoft(signature_info):
     status = str(signature_info.get("Status", "")).lower()
-    signer = str(signature_info.get("Signer", "")).lower()
-    root = str(signature_info.get("Root", "")).lower()
+    signer = str(signature_info.get("Signer", "")).strip()
+    revocation_state = str(
+        signature_info.get("RevocationState", "")
+    ).strip().lower()
     status_valid = status in {"valid", "0"}
-
-    if not status_valid:
-        return False
-
-    return "microsoft" in root or "microsoft corporation" in signer
+    microsoft_signers = {
+        "CN=Microsoft Corporation",
+        (
+            "CN=Microsoft Corporation, O=Microsoft Corporation, "
+            "L=Redmond, S=Washington, C=US"
+        ),
+        (
+            "CN=Microsoft Windows, O=Microsoft Corporation, "
+            "L=Redmond, S=Washington, C=US"
+        ),
+    }
+    return (
+        status_valid
+        and signature_info.get("ChainValid") is True
+        and revocation_state in {"checked", "offline"}
+        and signer in microsoft_signers
+    )
 
 
 def _candidate_score(package, target_arch, prefer_exact_arch=False):

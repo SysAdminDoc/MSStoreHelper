@@ -28,7 +28,8 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - ✨ **Smart Select** - Automatically picks the best packages and dependency frameworks (bundles, correct architecture, newest versions)
 - ⏭️ **Delta Detection** - Skips packages when the same or newer version is already installed
 - 🧭 **Architecture Override** - Force x64, x86, ARM64, ARM, or neutral package selection when needed
-- 🛡️ **Signature Verification** - Blocks installs unless the package signature chains to Microsoft
+- 🛡️ **Package Trust Gate** - Requires valid Authenticode and Windows chain evidence, manifest-to-signer identity consistency, architecture/type sanity, and Store product binding before automation
+- **Reviewable Quarantine** - Keeps identity-valid packages with unknown product bindings out of install, rollback, cache, mirror, and export workflows until the user reviews the exact source, identity, publisher, manifest, revocation state, and hash
 - **Package Ingress Guard** - Rejects unsafe package names, URLs, redirects, persisted paths, cache entries, and export staging before they can reach disk or PowerShell
 - 🔐 **Verified Downloads** - Writes packages atomically and records SHA-256 metadata before cache reuse
 - **Resumable Downloads** - Persists the queue across restarts and resumes `.part` downloads with HTTP Range requests
@@ -137,7 +138,8 @@ python MSStoreHelper.py --mirror C:\MSStoreMirror --host 0.0.0.0 --port 8765 --j
 4. Click **"➕ Add to Queue"** to add selected packages to the download queue
 5. Optional: enable **Shared cache** and pick a shared folder for air-gapped reuse
 6. Click **"⬇️ Download All"** to start downloading
-7. Click **"Diagnostics"** to export a redacted support ZIP with queue, source, log, and repair details
+7. If a package shows **Review required**, use its queue action to inspect the package evidence and explicitly promote it; failed signature, chain, manifest, or identity checks cannot be overridden
+8. Click **"Diagnostics"** to export a redacted support ZIP with queue, source, log, and repair details
 
 ### 🧾 Fleet Provisioning
 
@@ -171,9 +173,10 @@ python MSStoreHelper.py --mirror C:\MSStoreMirror --host 0.0.0.0 --port 8765 --j
 
 1. After downloading, click **"Install"**
 2. **Note**: Requires Administrator privileges
-3. Check the console output for any errors or hints
-4. To roll back, queue the app identity and click **"Rollback"** to install the newest cached version below the current version
-5. Click **"Diff"** to compare cached manifest permissions and dependencies between the newest two cached versions
+3. Only hash-current packages that passed the trust gate or received a journaled review can be installed
+4. Check the console output for any errors or hints
+5. To roll back, queue the app identity and click **"Rollback"** to install the newest trusted cached version below the current version
+6. Click **"Diff"** to compare cached manifest permissions and dependencies between the newest two trusted cached versions
 
 ### 🔧 Repairing the Store
 
@@ -223,7 +226,7 @@ MSStoreHelper uses two APIs:
    - Provides direct download links for Store packages
    - Returns all available versions and architectures
 
-Packages are downloaded to `%USERPROFILE%\Downloads\MSStoreHelper` and installed using PowerShell's `Add-AppxPackage` cmdlet.
+Packages are downloaded to `%USERPROFILE%\Downloads\MSStoreHelper`. Before any package can enter automation, MSStoreHelper binds its filename and source metadata to its signed manifest, validates the Windows certificate chain and revocation result, and records a hash-bound trust report. Packages with valid evidence but no authoritative Store product-to-identity mapping remain quarantined until an explicit review is written to `%APPDATA%\MSStoreHelper\trust-review.jsonl`. Trusted packages are installed using PowerShell's `Add-AppxPackage` cmdlet.
 
 ---
 
@@ -235,11 +238,13 @@ MSStoreHelper/
 ├── store_sources.py               # Store source health, retry, and fallback helpers
 ├── msstore_package_resolution.py  # Package selection and install ordering
 ├── package_ingress.py             # Package filename, URL, and path boundary
+├── package_trust.py               # Signature, manifest, identity, and promotion policy
 ├── pyproject.toml                 # Python package metadata
 ├── requirements.txt               # Pinned runtime dependencies
 ├── tests/
 │   ├── test_package_resolution.py # Resolver tests
 │   ├── test_package_ingress.py    # Adversarial ingress and path tests
+│   ├── test_package_trust.py      # Trust, quarantine, and promotion-gate tests
 │   ├── test_store_repair.py       # Store repair tests
 │   ├── test_offline_cache.py      # Shared cache tests
 │   ├── test_dism_export.py        # DISM export tests

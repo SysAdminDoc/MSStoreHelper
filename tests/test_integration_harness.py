@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 
-import json
 import os
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from MSStoreHelper import StoreAPI
+from package_trust import publisher_id_from_subject
+from test_trust_utils import mark_package_trusted
+
+
+def write_test_appx(path, publisher="CN=Contoso"):
+    manifest = f"""<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+  <Identity Name="Contoso.App" Publisher="{publisher}" Version="1.0.0.0" ProcessorArchitecture="x64" />
+</Package>
+"""
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("AppxManifest.xml", manifest)
 
 
 class FakeResponse:
@@ -100,26 +112,39 @@ class MockedIntegrationHarnessTests(unittest.TestCase):
         signature = {
             "Status": "Valid",
             "Signer": "CN=Contoso",
+            "SignerThumbprint": "A" * 40,
             "Root": "CN=Contoso Root",
-            "ChainValid": True,
+            "RootThumbprint": "B" * 40,
+            "ChainValid": False,
+            "ChainStatus": ["UntrustedRoot"],
+            "RevocationState": "checked",
         }
         with tempfile.TemporaryDirectory() as temp_dir:
-            package_path = os.path.join(temp_dir, "Contoso.msix")
-            with open(package_path, "wb") as handle:
-                handle.write(b"package")
-            with patch("MSStoreHelper.subprocess.run", return_value=FakeRunResult(0, json.dumps(signature), "")):
+            publisher_id = publisher_id_from_subject("CN=Contoso")
+            package_path = os.path.join(
+                temp_dir,
+                f"Contoso.App_1.0.0.0_x64__{publisher_id}.msix",
+            )
+            write_test_appx(package_path)
+            with patch.object(
+                StoreAPI,
+                "query_package_signature",
+                return_value=signature,
+            ):
                 ok, message = StoreAPI.verify_package_signature(package_path)
 
         self.assertFalse(ok)
-        self.assertIn("Contoso", message)
+        self.assertIn("signature-chain-invalid", message)
 
     def test_appx_install_failure_returns_powershell_output(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             package_path = os.path.join(temp_dir, "Contoso.msix")
             with open(package_path, "wb") as handle:
                 handle.write(b"package")
+            package = {"FileName": os.path.basename(package_path)}
+            mark_package_trusted(package, package_path)
             with patch("MSStoreHelper.subprocess.run", return_value=FakeRunResult(1, "", "0x80073CF3 dependency missing")):
-                ok, message = StoreAPI.install_package(package_path)
+                ok, message = StoreAPI.install_package(package_path, package)
 
         self.assertFalse(ok)
         self.assertIn("0x80073CF3", message)
@@ -134,11 +159,16 @@ class MockedIntegrationHarnessTests(unittest.TestCase):
                 handle.write(b"package")
             with open(tool_path, "wb") as handle:
                 handle.write(b"tool")
+            package = {
+                "FileName": os.path.basename(package_path),
+                "LocalPath": package_path,
+            }
+            mark_package_trusted(package, package_path)
 
             with patch("MSStoreHelper.subprocess.run", return_value=FakeRunResult(87, "", "content prep failed")):
                 with self.assertRaisesRegex(RuntimeError, "content prep failed"):
                     StoreAPI.create_intunewin_package(
-                        [{"FileName": os.path.basename(package_path), "LocalPath": package_path}],
+                        [package],
                         downloads,
                         os.path.join(temp_dir, "out", "Queue.intunewin"),
                         tool_path,

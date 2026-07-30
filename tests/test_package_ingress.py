@@ -22,6 +22,7 @@ from package_ingress import (
     validate_package_url,
     validate_response_redirects,
 )
+from test_trust_utils import mark_package_trusted
 
 
 class RedirectResponse:
@@ -352,10 +353,15 @@ class PackageIngressTests(unittest.TestCase):
             package_path_value = os.path.join(temp_dir, filename)
             with open(package_path_value, "wb") as handle:
                 handle.write(b"package")
+            package = {"FileName": filename}
+            mark_package_trusted(package, package_path_value)
             result = SimpleNamespace(returncode=0, stdout="", stderr="")
 
             with patch("MSStoreHelper.subprocess.run", return_value=result) as run_mock:
-                ok, message = StoreAPI.install_package(package_path_value)
+                ok, message = StoreAPI.install_package(
+                    package_path_value,
+                    package,
+                )
 
             self.assertTrue(ok, message)
             command = run_mock.call_args.args[0][-1]

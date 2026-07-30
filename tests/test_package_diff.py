@@ -6,6 +6,7 @@ import unittest
 import zipfile
 
 from MSStoreHelper import StoreAPI
+from test_trust_utils import mark_package_trusted
 
 
 def write_appx(path, version, capabilities=None, dependencies=None):
@@ -70,7 +71,9 @@ class PackageDiffTests(unittest.TestCase):
             for version in ("1.0.0.0", "2.0.0.0", "3.0.0.0"):
                 path = os.path.join(cache_dir, f"Contoso.App_{version}_x64__test.msix")
                 write_appx(path, version, capabilities=["internetClient"])
-                StoreAPI.write_artifact_manifest({"FileName": os.path.basename(path)}, path, cache_dir)
+                package = {"FileName": os.path.basename(path)}
+                mark_package_trusted(package, path)
+                StoreAPI.write_artifact_manifest(package, path, cache_dir)
 
             candidates = StoreAPI.package_diff_candidates([cache_dir], ["Contoso.App"])
 

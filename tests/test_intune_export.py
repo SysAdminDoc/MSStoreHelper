@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from MSStoreHelper import StoreAPI
+from test_trust_utils import mark_package_trusted
 
 
 class IntuneExportTests(unittest.TestCase):
@@ -19,15 +20,24 @@ class IntuneExportTests(unittest.TestCase):
                 with open(path, "wb") as handle:
                     handle.write(b"package")
 
+            app_package = {
+                "FileName": os.path.basename(app),
+                "LocalPath": app,
+            }
+            dependency_package = {
+                "FileName": os.path.basename(vclibs),
+                "LocalPath": vclibs,
+                "StoreQuery": {
+                    "Ring": "WIF",
+                    "Language": "ja-JP",
+                    "Market": "JP",
+                },
+            }
+            mark_package_trusted(app_package, app)
+            mark_package_trusted(dependency_package, vclibs)
+
             info = StoreAPI.prepare_intune_package_source(
-                [
-                    {"FileName": os.path.basename(app), "LocalPath": app},
-                    {
-                        "FileName": os.path.basename(vclibs),
-                        "LocalPath": vclibs,
-                        "StoreQuery": {"Ring": "WIF", "Language": "ja-JP", "Market": "JP"},
-                    },
-                ],
+                [app_package, dependency_package],
                 staging,
                 downloads,
                 "x64",

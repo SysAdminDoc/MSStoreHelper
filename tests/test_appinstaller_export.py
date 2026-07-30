@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from MSStoreHelper import APPINSTALLER_NS, StoreAPI
+from test_trust_utils import mark_package_trusted
 
 
 def write_fake_appx(path, name, publisher="CN=Contoso", version="1.0.0.0", arch="x64"):
@@ -30,11 +31,19 @@ class AppInstallerExportTests(unittest.TestCase):
             write_fake_appx(vclibs, "Microsoft.VCLibs.140.00", publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US", version="14.0.33519.0")
 
             appinstaller_path = os.path.join(temp_dir, "ContosoQueue.appinstaller")
+            app_package = {
+                "FileName": os.path.basename(app),
+                "LocalPath": app,
+            }
+            dependency_package = {
+                "FileName": os.path.basename(vclibs),
+                "LocalPath": vclibs,
+            }
+            mark_package_trusted(app_package, app)
+            mark_package_trusted(dependency_package, vclibs)
+
             result = StoreAPI.write_appinstaller_export(
-                [
-                    {"FileName": os.path.basename(app), "LocalPath": app},
-                    {"FileName": os.path.basename(vclibs), "LocalPath": vclibs},
-                ],
+                [app_package, dependency_package],
                 downloads,
                 appinstaller_path,
                 "x64",

@@ -10,6 +10,7 @@ import urllib.request
 from unittest.mock import patch
 
 from MSStoreHelper import StoreAPI, main, run_cli
+from test_trust_utils import mark_package_trusted
 
 
 class CliWorkflowTests(unittest.TestCase):
@@ -136,7 +137,12 @@ class CliWorkflowTests(unittest.TestCase):
             path = os.path.join(temp_dir, filename)
             with open(path, "wb") as handle:
                 handle.write(b"package")
-            StoreAPI.write_artifact_manifest({"FileName": filename, "Url": "https://example.test/app"}, path, temp_dir)
+            package_record = {
+                "FileName": filename,
+                "Url": "https://example.test/app",
+            }
+            mark_package_trusted(package_record, path)
+            StoreAPI.write_artifact_manifest(package_record, path, temp_dir)
 
             index = StoreAPI.build_mirror_index(temp_dir, "127.0.0.1", 8765)
 
@@ -153,7 +159,9 @@ class CliWorkflowTests(unittest.TestCase):
             path = os.path.join(temp_dir, filename)
             with open(path, "wb") as handle:
                 handle.write(b"package")
-            StoreAPI.write_artifact_manifest({"FileName": filename}, path, temp_dir)
+            package_record = {"FileName": filename}
+            mark_package_trusted(package_record, path)
+            StoreAPI.write_artifact_manifest(package_record, path, temp_dir)
 
             server, index = StoreAPI.create_mirror_server(temp_dir, "127.0.0.1", 0)
             port = server.server_address[1]
@@ -182,7 +190,9 @@ class CliWorkflowTests(unittest.TestCase):
             path = os.path.join(temp_dir, filename)
             with open(path, "wb") as handle:
                 handle.write(b"package")
-            StoreAPI.write_artifact_manifest({"FileName": filename}, path, temp_dir)
+            package_record = {"FileName": filename}
+            mark_package_trusted(package_record, path)
+            StoreAPI.write_artifact_manifest(package_record, path, temp_dir)
 
             with patch("MSStoreHelper.MSStoreHelperApp") as app_mock:
                 exit_code = run_cli(

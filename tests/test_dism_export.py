@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from MSStoreHelper import StoreAPI
+from test_trust_utils import mark_package_trusted
 
 
 class DismExportTests(unittest.TestCase):
@@ -18,6 +19,12 @@ class DismExportTests(unittest.TestCase):
                 },
                 {"FileName": "Contoso.App_2.0.0.0_x64__test.BlockMap"},
             ]
+            for package in packages[:2]:
+                package_path = os.path.join(temp_dir, package["FileName"])
+                with open(package_path, "wb") as handle:
+                    handle.write(b"package")
+                package["LocalPath"] = package_path
+                mark_package_trusted(package, package_path)
 
             script = StoreAPI.generate_dism_provision_script(packages, temp_dir, "x64", temp_dir)
 
@@ -43,8 +50,13 @@ class DismExportTests(unittest.TestCase):
             with open(package_path, "wb") as handle:
                 handle.write(b"package")
 
+            package = {
+                "FileName": os.path.basename(package_path),
+                "LocalPath": package_path,
+            }
+            mark_package_trusted(package, package_path)
             script = StoreAPI.generate_dism_provision_script(
-                [{"FileName": os.path.basename(package_path), "LocalPath": package_path}],
+                [package],
                 os.path.join(temp_dir, "downloads"),
                 "x64",
                 script_dir,
