@@ -113,7 +113,7 @@ def resolve_target(
         "--requirement",
         str(INPUT_PATH),
     ]
-    subprocess.run(command, cwd=REPO_ROOT, check=True)
+    subprocess.run(command, cwd=REPO_ROOT, check=True, timeout=900)
 
     artifacts = []
     for path in sorted(destination.iterdir(), key=lambda item: item.name.lower()):

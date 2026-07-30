@@ -239,6 +239,7 @@ def prepare_diagnostic_entries(
     app_log,
     powershell_transcript,
     repair_manifests,
+    operation_history=None,
     path_tokens=None,
 ):
     structured = {
@@ -246,6 +247,7 @@ def prepare_diagnostic_entries(
         "source-health.json": source_health,
         "queue.json": queue,
         "repair-manifests.json": repair_manifests,
+        "operation-history.json": operation_history or [],
     }
     entries = {}
     for name, value in structured.items():

@@ -188,11 +188,13 @@ def install_validation(
                 ],
                 cwd=REPO_ROOT,
                 check=True,
+                timeout=900,
             )
             subprocess.run(
                 [str(python), "-m", "unittest", "discover", "-s", "tests"],
                 cwd=REPO_ROOT,
                 check=True,
+                timeout=600,
             )
             return
 
@@ -218,6 +220,7 @@ def install_validation(
             ],
             cwd=REPO_ROOT,
             check=True,
+            timeout=900,
         )
         installed: dict[str, str] = {}
         for metadata_path in target.glob("*.dist-info/METADATA"):
@@ -271,6 +274,7 @@ def build_wheelhouse(lock_path: Path, output: Path, *, test: bool) -> Path:
             ],
             cwd=REPO_ROOT,
             check=True,
+            timeout=900,
         )
         files = verify_wheels(staging, lock_path)
         if test:

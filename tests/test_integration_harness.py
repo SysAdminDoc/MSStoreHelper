@@ -143,7 +143,7 @@ class MockedIntegrationHarnessTests(unittest.TestCase):
                 handle.write(b"package")
             package = {"FileName": os.path.basename(package_path)}
             mark_package_trusted(package, package_path)
-            with patch("MSStoreHelper.subprocess.run", return_value=FakeRunResult(1, "", "0x80073CF3 dependency missing")):
+            with patch("MSStoreHelper.run_command", return_value=FakeRunResult(1, "", "0x80073CF3 dependency missing")):
                 ok, message = StoreAPI.install_package(package_path, package)
 
         self.assertFalse(ok)
@@ -165,7 +165,7 @@ class MockedIntegrationHarnessTests(unittest.TestCase):
             }
             mark_package_trusted(package, package_path)
 
-            with patch("MSStoreHelper.subprocess.run", return_value=FakeRunResult(87, "", "content prep failed")):
+            with patch("MSStoreHelper.run_command", return_value=FakeRunResult(87, "", "content prep failed")):
                 with self.assertRaisesRegex(RuntimeError, "content prep failed"):
                     StoreAPI.create_intunewin_package(
                         [package],

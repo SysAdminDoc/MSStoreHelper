@@ -14,6 +14,16 @@ from test_trust_utils import mark_package_trusted
 
 
 class CliWorkflowTests(unittest.TestCase):
+    def setUp(self):
+        self._journal_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._journal_dir.cleanup)
+        self._journal_patch = patch(
+            "MSStoreHelper.OPERATION_JOURNAL_PATH",
+            os.path.join(self._journal_dir.name, "operation-journal.json"),
+        )
+        self._journal_patch.start()
+        self.addCleanup(self._journal_patch.stop)
+
     def test_resolve_cli_app_maps_package_identity_to_catalog_product(self):
         def fail_search(*_args, **_kwargs):
             raise AssertionError("catalog identity should not require Store search")
@@ -82,7 +92,55 @@ class CliWorkflowTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["Action"], "download")
         self.assertEqual(payload["Packages"][0]["Status"], "downloaded")
+        self.assertEqual(payload["Operation"]["State"], "succeeded")
+        self.assertEqual(payload["Operation"]["ExitCode"], 0)
+        self.assertTrue(payload["Operation"]["CorrelationId"])
         self.assertEqual(stderr.getvalue(), "")
+
+    def test_run_cli_download_reports_partial_result_and_exit_code(self):
+        packages = [
+            {
+                "FileName": f"Contoso.App_{index}.0.0.0_x64__test.msix",
+                "Url": f"https://example.test/app-{index}.msix",
+                "Architecture": "x64",
+                "FileType": "MSIX",
+            }
+            for index in (1, 2)
+        ]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def fake_download(_url, filepath, progress_callback=None, package=None):
+            if package["FileName"] == packages[1]["FileName"]:
+                return False, "network interrupted"
+            with open(filepath, "wb") as handle:
+                handle.write(b"package")
+            return True, "Success"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(StoreAPI, "get_packages_with_diagnostics", return_value={"Packages": packages, "Errors": [], "Query": {"ProductId": "9N0DX20HK701"}}):
+                with patch.object(StoreAPI, "smart_select", return_value=[item.copy() for item in packages]):
+                    with patch.object(StoreAPI, "order_packages_for_install", side_effect=lambda values, _arch: values):
+                        with patch.object(StoreAPI, "download_file", side_effect=fake_download):
+                            exit_code = run_cli(
+                                [
+                                    "--download",
+                                    "Microsoft.WindowsTerminal",
+                                    "--output",
+                                    temp_dir,
+                                    "--json",
+                                ],
+                                stdout,
+                                stderr,
+                            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["Operation"]["State"], "partial")
+        self.assertEqual(payload["Operation"]["Counts"]["Succeeded"], 1)
+        self.assertEqual(payload["Operation"]["Counts"]["Failed"], 1)
+        self.assertEqual(payload["Operation"]["ExitCode"], exit_code)
+        self.assertIn("network interrupted", stderr.getvalue())
 
     def test_run_cli_install_skips_current_package_without_installing(self):
         package = {

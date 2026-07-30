@@ -14,6 +14,8 @@ import threading
 import uuid
 from datetime import datetime, timezone
 
+from command_runner import run_command
+
 
 REPAIR_SCHEMA_VERSION = 1
 DEFAULT_REPAIR_RETENTION = 10
@@ -1205,11 +1207,8 @@ def _default_is_admin():
 
 
 def _run_process(args, *, env=None, timeout=90):
-    return subprocess.run(
+    return run_command(
         args,
-        capture_output=True,
-        text=True,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         env=env,
         timeout=timeout,
     )

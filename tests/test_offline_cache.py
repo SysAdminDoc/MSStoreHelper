@@ -196,7 +196,7 @@ class OfflineCacheTests(unittest.TestCase):
             package = {"FileName": os.path.basename(package_path)}
             mark_package_trusted(package, package_path)
 
-            with patch("MSStoreHelper.subprocess.run") as run_mock:
+            with patch("MSStoreHelper.run_command") as run_mock:
                 run_mock.return_value.returncode = 0
                 run_mock.return_value.stdout = "rollback ok"
                 run_mock.return_value.stderr = ""

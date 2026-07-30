@@ -20,6 +20,9 @@ All notable changes to MSStoreHelper will be documented in this file.
 - Added an exact in-app diagnostic inventory/content preview and writes the reviewed bytes through a verified atomic ZIP replacement; unsupported values abort before a file is created.
 - Raised the supported runtime to CPython 3.11-3.14 and upgraded Requests to 2.34.2.
 - Added exact transitive pins, per-interpreter/architecture SHA-256 locks, verified offline wheelhouse manifests, and Windows x64/x86/ARM64 locked-environment CI with a fail-closed vulnerability audit.
+- Added one typed operation coordinator for download, install, rollback, package diff, Intune export, size lookup, repair, and restore, with immutable worker inputs, correlation IDs, truthful partial results, and deterministic cancellation.
+- Replaced critical daemon workers with non-daemon operations that finish or cancel safely before the window closes, and routed worker UI changes through a shutdown-safe dispatcher.
+- Added mandatory subprocess deadlines with terminate/kill fallback, a bounded atomic local operation journal, diagnostic history export, and CLI partial-success exit code `2`.
 
 ## [v3.36.0] - 2026-07-29
 

@@ -17,6 +17,7 @@ import json
 import re
 import hashlib
 import shutil
+import copy
 import ssl
 import tempfile
 import time
@@ -29,7 +30,7 @@ try:
     import winreg
 except ImportError:
     winreg = None
-from tkinter import filedialog
+from tkinter import TclError, filedialog
 from datetime import datetime, timezone
 from msstore_package_resolution import (
     annotate_package,
@@ -107,6 +108,13 @@ from store_sources import (
     package_lookup_fallbacks,
     request_with_retries,
     source_status_summary,
+)
+from command_runner import run_command
+from operation_coordinator import (
+    OperationConflictError,
+    OperationCoordinator,
+    OperationJournal,
+    OperationState,
 )
 
 MINIMUM_PYTHON = (3, 11)
@@ -215,6 +223,7 @@ USER_PROFILE_PATH = os.path.join(APP_DATA_DIR, "profile.json")
 REPAIR_BACKUP_DIR = os.path.join(APP_DATA_DIR, "RepairBackups")
 DOWNLOAD_STATE_PATH = os.path.join(APP_DATA_DIR, "download-state.json")
 TRUST_REVIEW_JOURNAL_PATH = os.path.join(APP_DATA_DIR, "trust-review.jsonl")
+OPERATION_JOURNAL_PATH = os.path.join(APP_DATA_DIR, "operation-journal.json")
 
 try:
     IS_ADMIN = ctypes.windll.shell32.IsUserAnAdmin() != 0
@@ -1170,11 +1179,8 @@ if ($sig.SignerCertificate) {{
 """
         environment = os.environ.copy()
         environment["MSSTOREHELPER_PACKAGE_PATH"] = package_path
-        result = subprocess.run(
+        result = run_command(
             [POWERSHELL_EXE, "-NoProfile", "-Command", command],
-            capture_output=True,
-            text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
             env=environment,
             timeout=30,
         )
@@ -1695,6 +1701,12 @@ if ($sig.SignerCertificate) {{
     ):
         queue_metadata = StoreAPI.diagnostic_queue_metadata(queue)
         repair_manifests = StoreAPI.collect_recent_repair_manifests()
+        try:
+            operation_history = OperationJournal(
+                OPERATION_JOURNAL_PATH,
+            ).snapshot()[-20:]
+        except (OSError, ValueError, json.JSONDecodeError):
+            operation_history = []
         diagnostics = {
             "AppName": APP_NAME,
             "AppVersion": app_version,
@@ -1715,6 +1727,7 @@ if ($sig.SignerCertificate) {{
             "SourceHealth": source_health or [],
             "QueueCount": len(queue_metadata),
             "RepairManifestCount": len(repair_manifests),
+            "OperationHistoryCount": len(operation_history),
         }
         return prepare_diagnostic_entries(
             diagnostics=diagnostics,
@@ -1725,6 +1738,7 @@ if ($sig.SignerCertificate) {{
                 StoreAPI.powershell_transcript_from_log(log_text)
             ),
             repair_manifests=repair_manifests,
+            operation_history=operation_history,
             path_tokens={"APP_DATA": APP_DATA_DIR},
         )
 
@@ -1766,7 +1780,14 @@ if ($sig.SignerCertificate) {{
         )
     
     @staticmethod
-    def download_file(url, filepath, progress_callback=None, package=None, destination_root=None):
+    def download_file(
+        url,
+        filepath,
+        progress_callback=None,
+        package=None,
+        destination_root=None,
+        cancel_event=None,
+    ):
         try:
             url = validate_package_url(url)
             validated_package = (
@@ -1806,6 +1827,8 @@ if ($sig.SignerCertificate) {{
 
             existing = os.path.getsize(part_path) if os.path.exists(part_path) else 0
             headers = {"Range": f"bytes={existing}-"} if existing else None
+            if cancel_event is not None and cancel_event.is_set():
+                return False, "Download cancelled before the request started"
             with requests.get(url, stream=True, timeout=60, headers=headers) as r:
                 validate_response_redirects(url, r)
                 r.raise_for_status()
@@ -1825,6 +1848,13 @@ if ($sig.SignerCertificate) {{
                 with open(part_path, mode) as f:
                     downloaded = existing
                     for chunk in r.iter_content(chunk_size=8192):
+                        if cancel_event is not None and cancel_event.is_set():
+                            f.flush()
+                            os.fsync(f.fileno())
+                            return (
+                                False,
+                                "Download cancelled; partial file preserved for resume",
+                            )
                         if not chunk:
                             continue
                         f.write(chunk)
@@ -2323,7 +2353,12 @@ if ($sig.SignerCertificate) {{
         return candidates
 
     @staticmethod
-    def rollback_package(package_identity_name, artifact_path, package=None):
+    def rollback_package(
+        package_identity_name,
+        artifact_path,
+        package=None,
+        cancel_event=None,
+    ):
         try:
             package_path = validate_existing_package_path(
                 artifact_path,
@@ -2369,12 +2404,11 @@ if ($sig.SignerCertificate) {{
             environment = os.environ.copy()
             environment["MSSTOREHELPER_PACKAGE_PATH"] = package_path
             environment["MSSTOREHELPER_ROLLBACK_IDENTITY"] = identity
-            result = subprocess.run(
+            result = run_command(
                 [POWERSHELL_EXE, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
-                capture_output=True,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
                 env=environment,
+                timeout=120,
+                cancel_event=cancel_event,
             )
             if result.returncode == 0:
                 return True, result.stdout.strip() or "Rollback installed"
@@ -2821,11 +2855,9 @@ if ($sig.SignerCertificate) {{
     @staticmethod
     def get_winget_version():
         try:
-            result = subprocess.run(
+            result = run_command(
                 ["winget", "--version"],
-                capture_output=True,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=15,
             )
             version = (result.stdout or "").strip()
             return version.lstrip("v") if result.returncode == 0 and version else None
@@ -3122,7 +3154,14 @@ if ($sig.SignerCertificate) {{
         ]
 
     @staticmethod
-    def create_intunewin_package(packages, output_path, intunewin_path, tool_path, target_arch=SYSTEM_ARCH):
+    def create_intunewin_package(
+        packages,
+        output_path,
+        intunewin_path,
+        tool_path,
+        target_arch=SYSTEM_ARCH,
+        cancel_event=None,
+    ):
         if not tool_path or not os.path.exists(tool_path):
             raise FileNotFoundError("IntuneWinAppUtil.exe was not found")
 
@@ -3147,11 +3186,10 @@ if ($sig.SignerCertificate) {{
                 source_info["SetupFile"],
                 output_dir,
             )
-            result = subprocess.run(
+            result = run_command(
                 command,
-                capture_output=True,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=600,
+                cancel_event=cancel_event,
             )
             if result.returncode != 0:
                 error = (result.stderr or result.stdout or "IntuneWinAppUtil failed").strip()
@@ -3167,7 +3205,7 @@ if ($sig.SignerCertificate) {{
         return generated, detection_sidecar, source_info["PackageCount"]
 
     @staticmethod
-    def install_package(filepath, package=None):
+    def install_package(filepath, package=None, cancel_event=None):
         try:
             package_path = validate_existing_package_path(
                 filepath,
@@ -3190,11 +3228,10 @@ if ($sig.SignerCertificate) {{
             ])
             environment = os.environ.copy()
             environment["MSSTOREHELPER_PACKAGE_PATH"] = package_path
-            result = subprocess.run(
+            result = run_command(
                 [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
-                capture_output=True,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=300,
+                cancel_event=cancel_event,
                 env=environment,
             )
             
@@ -3233,11 +3270,9 @@ if ($sig.SignerCertificate) {{
                 "Sort-Object -Property Version -Descending | "
                 "Select-Object -First 1 -ExpandProperty Version"
             )
-            result = subprocess.run(
+            result = run_command(
                 [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
-                capture_output=True,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
+                timeout=30,
             )
             if result.returncode != 0:
                 return None
@@ -3254,11 +3289,9 @@ if ($sig.SignerCertificate) {{
             "@($installed + $provisioned | Where-Object { $_ } | Sort-Object -Unique) | ConvertTo-Json -Compress"
         )
         try:
-            result = subprocess.run(
+            result = run_command(
                 [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
-                capture_output=True,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
+                timeout=60,
             )
             if result.returncode != 0 or not result.stdout.strip():
                 return set()
@@ -3304,11 +3337,9 @@ if ($sig.SignerCertificate) {{
             "@($installed + $provisioned | Where-Object { $_.Name }) | ConvertTo-Json -Compress"
         )
         try:
-            result = subprocess.run(
+            result = run_command(
                 [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
-                capture_output=True,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
+                timeout=60,
             )
             if result.returncode != 0 or not result.stdout.strip():
                 return {}
@@ -3596,12 +3627,9 @@ function Backup-MSStoreHelperRegistryPath {{
                 log_callback(desc)
             try:
                 command = StoreAPI._repair_powershell_prelude(context) + "\n" + cmd if context else cmd
-                result = subprocess.run(
+                result = run_command(
                     [POWERSHELL_EXE, "-NoProfile", "-Command", command],
-                    capture_output=True,
-                    text=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                    timeout=timeout
+                    timeout=timeout,
                 )
                 step_result = {
                     "Description": desc,
@@ -3882,8 +3910,17 @@ class MSStoreHelperApp(ctk.CTk):
         self._repair_operation_active = False
         self._repair_cancel_event = None
         self._repair_buttons = []
+        self._operation_controls = []
+        self._last_operation_state = None
+        self._closing = False
+        self.operation_coordinator = OperationCoordinator(
+            journal=OperationJournal(OPERATION_JOURNAL_PATH),
+            on_change=self._operation_changed_from_worker,
+        )
         
         self._build_ui()
+        self._operation_controls.extend(self._repair_buttons)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         if self.download_queue:
             self._update_queue_ui()
         self._show_welcome()
@@ -4282,7 +4319,22 @@ class MSStoreHelperApp(ctk.CTk):
         
         action_frame = ctk.CTkFrame(controls, fg_color="transparent")
         action_frame.pack(fill="x")
-        ctk.CTkButton(action_frame, text="Download all", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._start_download).pack(fill="x", pady=(0, 6))
+        self.download_button = ctk.CTkButton(action_frame, text="Download all", height=38, font=("Segoe UI Semibold", 13), fg_color=Theme.PRIMARY, hover_color=Theme.PRIMARY_HOVER, command=self._start_download)
+        self.download_button.pack(fill="x", pady=(0, 6))
+        self.operation_cancel_button = ctk.CTkButton(
+            action_frame,
+            text="Cancel active operation",
+            height=30,
+            font=("Segoe UI", 10),
+            fg_color="transparent",
+            text_color=Theme.TEXT_MUTED,
+            border_width=1,
+            border_color=Theme.BORDER_SUBTLE,
+            hover_color=Theme.BG_CARD_HOVER,
+            state="disabled",
+            command=self._cancel_active_operation,
+        )
+        self.operation_cancel_button.pack(fill="x", pady=(0, 6))
 
         export_grid = ctk.CTkFrame(action_frame, fg_color="transparent")
         export_grid.pack(fill="x", pady=(0, 6))
@@ -4295,7 +4347,7 @@ class MSStoreHelperApp(ctk.CTk):
         ]
         for index, (label, command) in enumerate(export_actions):
             row, column = divmod(index, 2)
-            ctk.CTkButton(
+            button = ctk.CTkButton(
                 export_grid,
                 text=label,
                 height=29,
@@ -4306,13 +4358,26 @@ class MSStoreHelperApp(ctk.CTk):
                 border_color=Theme.BORDER,
                 hover_color=Theme.BG_CARD_HOVER,
                 command=command,
-            ).grid(row=row, column=column, sticky="ew", padx=(0, 3) if column == 0 else (3, 0), pady=(0, 5) if row == 0 else 0)
+            )
+            button.grid(row=row, column=column, sticky="ew", padx=(0, 3) if column == 0 else (3, 0), pady=(0, 5) if row == 0 else 0)
+            self._operation_controls.append(button)
 
         install_row = ctk.CTkFrame(action_frame, fg_color="transparent")
         install_row.pack(fill="x")
-        ctk.CTkButton(install_row, text="Install", width=76, height=34, font=("Segoe UI Semibold", 11), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._start_install).pack(side="left", fill="x", expand=True, padx=(0, 3))
-        ctk.CTkButton(install_row, text="Rollback", width=76, height=34, font=("Segoe UI Semibold", 11), fg_color="transparent", text_color=Theme.WARNING, border_width=1, border_color=Theme.WARNING, hover_color=Theme.BG_CARD_HOVER, command=self._start_rollback).pack(side="left", fill="x", expand=True, padx=3)
-        ctk.CTkButton(install_row, text="Diff", width=64, height=34, font=("Segoe UI Semibold", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._show_package_diff).pack(side="left", fill="x", expand=True, padx=(3, 0))
+        self.install_button = ctk.CTkButton(install_row, text="Install", width=76, height=34, font=("Segoe UI Semibold", 11), fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self._start_install)
+        self.install_button.pack(side="left", fill="x", expand=True, padx=(0, 3))
+        self.rollback_button = ctk.CTkButton(install_row, text="Rollback", width=76, height=34, font=("Segoe UI Semibold", 11), fg_color="transparent", text_color=Theme.WARNING, border_width=1, border_color=Theme.WARNING, hover_color=Theme.BG_CARD_HOVER, command=self._start_rollback)
+        self.rollback_button.pack(side="left", fill="x", expand=True, padx=3)
+        self.diff_button = ctk.CTkButton(install_row, text="Diff", width=64, height=34, font=("Segoe UI Semibold", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._show_package_diff)
+        self.diff_button.pack(side="left", fill="x", expand=True, padx=(3, 0))
+        self._operation_controls.extend(
+            [
+                self.download_button,
+                self.install_button,
+                self.rollback_button,
+                self.diff_button,
+            ]
+        )
     
     def _build_log_panel(self):
         """Build the collapsible log/console panel"""
@@ -5227,10 +5292,138 @@ Fixes "needs to be online" and similar errors.
         self.selection_info.configure(text=f"{count} selected ({format_size(total_size)})")
 
     def _post_ui(self, callback):
+        if self._closing:
+            return False
         try:
             self.after(0, callback)
-        except RuntimeError:
-            pass
+            return True
+        except (RuntimeError, TclError):
+            return False
+
+    def _operation_changed_from_worker(self, snapshot):
+        self._post_ui(
+            lambda value=copy.deepcopy(snapshot): (
+                self._apply_operation_snapshot(value)
+            )
+        )
+
+    def _apply_operation_snapshot(self, snapshot):
+        state = snapshot.get("State", OperationState.FAILED.value)
+        kind = snapshot.get("Kind", "operation")
+        correlation_id = snapshot.get("CorrelationId", "")
+        active = state in {
+            OperationState.QUEUED.value,
+            OperationState.RUNNING.value,
+            OperationState.CANCELLING.value,
+        }
+        for button in self._operation_controls:
+            try:
+                button.configure(state="disabled" if active else "normal")
+            except (RuntimeError, TclError):
+                continue
+        self.operation_cancel_button.configure(
+            state="normal" if active else "disabled",
+            text_color=Theme.WARNING if active else Theme.TEXT_MUTED,
+            border_color=Theme.WARNING if active else Theme.BORDER_SUBTLE,
+        )
+        repair_active = active and kind in {"repair", "restore"}
+        self._repair_operation_active = repair_active
+        self.repair_cancel_button.configure(
+            state="normal" if repair_active else "disabled",
+            text_color=Theme.WARNING if repair_active else Theme.TEXT_MUTED,
+            border_color=Theme.WARNING if repair_active else Theme.BORDER_SUBTLE,
+        )
+
+        self._update_progress(float(snapshot.get("Progress") or 0.0))
+        progress_message = snapshot.get("ProgressMessage") or ""
+        state_key = (correlation_id, state)
+        if state_key != self._last_operation_state:
+            self._last_operation_state = state_key
+            level = {
+                OperationState.SUCCEEDED.value: "SUCCESS",
+                OperationState.PARTIAL.value: "WARNING",
+                OperationState.FAILED.value: "ERROR",
+                OperationState.CANCELLED.value: "WARNING",
+            }.get(state, "INFO")
+            self._log(
+                level,
+                f"{kind} operation {correlation_id} is {state}",
+            )
+
+        if active:
+            label = progress_message or f"{kind.title()} is {state}…"
+            self._update_status(label, Theme.WARNING if state == "cancelling" else Theme.INFO)
+            return
+
+        counts = snapshot.get("Counts") or {}
+        completed = int(counts.get("Succeeded", 0)) + int(counts.get("Skipped", 0))
+        failed = int(counts.get("Failed", 0))
+        cancelled = int(counts.get("Cancelled", 0))
+        details = (
+            f"{completed} completed, {failed} failed, "
+            f"{cancelled} cancelled"
+        )
+        if state == OperationState.SUCCEEDED.value:
+            self._update_status(f"{kind.title()} succeeded — {details}", Theme.SUCCESS)
+        elif state == OperationState.PARTIAL.value:
+            self._update_status(f"{kind.title()} partially completed — {details}", Theme.WARNING)
+        elif state == OperationState.CANCELLED.value:
+            self._update_status(f"{kind.title()} cancelled — {details}", Theme.WARNING)
+        else:
+            self._update_status(f"{kind.title()} failed — {details}", Theme.DANGER)
+
+    def _cancel_active_operation(self):
+        if not self.operation_coordinator.cancel():
+            return
+        self.operation_cancel_button.configure(state="disabled")
+        self.repair_cancel_button.configure(state="disabled")
+        self._update_status(
+            "Cancellation requested; waiting for a safe checkpoint…",
+            Theme.WARNING,
+        )
+        self._log(
+            "WARNING",
+            "Cancellation requested; the active step will terminate or finish safely.",
+        )
+
+    def _on_close(self):
+        if self._closing:
+            return
+        if not self.operation_coordinator.is_active:
+            self._finalize_close()
+            return
+        self._closing = True
+        self.operation_coordinator.cancel()
+        for button in self._operation_controls:
+            button.configure(state="disabled")
+        self.operation_cancel_button.configure(state="disabled")
+        self.repair_cancel_button.configure(state="disabled")
+        self._update_status(
+            "Stopping the active operation before closing…",
+            Theme.WARNING,
+        )
+        self._log(
+            "WARNING",
+            "Window close requested; waiting for the non-daemon operation to stop safely.",
+        )
+        self.after(100, self._poll_operation_shutdown)
+
+    def _poll_operation_shutdown(self):
+        thread = self.operation_coordinator.active_thread
+        if thread and thread.is_alive():
+            self.after(100, self._poll_operation_shutdown)
+            return
+        self._finalize_close()
+
+    def _finalize_close(self):
+        self._closing = True
+        if self.keep_updated_after_id:
+            try:
+                self.after_cancel(self.keep_updated_after_id)
+            except (RuntimeError, TclError):
+                pass
+            self.keep_updated_after_id = None
+        self.destroy()
 
     def _source_health_worker(self):
         self._post_ui(lambda: self._log("INFO", "Checking Store source availability..."))
@@ -5602,15 +5795,68 @@ Fixes "needs to be online" and similar errors.
             self._fetch_selected()
     
     def _fetch_sizes_async(self):
-        def worker():
-            for i, pkg in enumerate(self.current_packages):
-                size = StoreAPI.get_file_size(pkg['Url'])
-                pkg['SizeBytes'] = size
-                pkg['SizeStr'] = format_size(size)
-                if i < len(self.package_rows):
-                    self.after(0, lambda idx=i, s=pkg['SizeStr']: self.package_rows[idx].update_size(s))
-            self.after(0, self._update_selection_info)
-        threading.Thread(target=worker, daemon=True).start()
+        packages = tuple(
+            {
+                "FileName": package.get("FileName", ""),
+                "Url": package.get("Url", ""),
+            }
+            for package in self.current_packages
+            if package.get("FileName") and package.get("Url")
+        )
+        if not packages:
+            return
+        try:
+            self.operation_coordinator.start(
+                "size-fetch",
+                lambda context, value=packages: self._fetch_sizes_worker(
+                    context,
+                    value,
+                ),
+                input_summary={"PackageCount": len(packages)},
+            )
+        except OperationConflictError as exc:
+            self._log("INFO", f"Package size lookup deferred: {exc}")
+
+    def _fetch_sizes_worker(self, context, packages):
+        total = len(packages)
+        for index, package in enumerate(packages):
+            if context.cancellation_requested:
+                for remaining in packages[index:]:
+                    context.cancelled(
+                        remaining["FileName"],
+                        "Size lookup was cancelled",
+                    )
+                break
+            filename = package["FileName"]
+            context.progress(
+                index / total,
+                f"Reading package sizes ({index + 1}/{total})",
+            )
+            size = StoreAPI.get_file_size(package["Url"])
+            if size > 0:
+                context.succeeded(filename, "Package size resolved", SizeBytes=size)
+                self._post_ui(
+                    lambda name=filename, value=size: (
+                        self._apply_package_size(name, value)
+                    )
+                )
+            else:
+                context.failed(filename, "Package size was unavailable")
+        context.progress(1.0, f"Size lookup processed {total} package(s)")
+        self._post_ui(self._update_selection_info)
+
+    def _apply_package_size(self, filename, size):
+        for package in self.current_packages:
+            if package.get("FileName") == filename:
+                package["SizeBytes"] = int(size)
+                package["SizeStr"] = format_size(size)
+                break
+        for row in self.package_rows:
+            if row.pkg_data.get("FileName") == filename:
+                row.pkg_data["SizeBytes"] = int(size)
+                row.pkg_data["SizeStr"] = format_size(size)
+                row.update_size(format_size(size))
+                break
     
     def _smart_select(self):
         self._log("INFO", f"Running Smart Select on {len(self.current_packages)} packages...")
@@ -5826,6 +6072,41 @@ Fixes "needs to be online" and similar errors.
             StoreAPI.write_download_state(self.download_queue, self.output_path)
         else:
             StoreAPI.clear_download_state()
+
+    @staticmethod
+    def _package_snapshot(package):
+        return copy.deepcopy({
+            key: value
+            for key, value in package.items()
+            if not str(key).startswith("_")
+        })
+
+    def _set_queue_item_status(self, filename, text, color):
+        for package in self.download_queue:
+            if package.get("FileName") != filename:
+                continue
+            widget = package.get("_status_widget")
+            if widget is not None:
+                widget.configure(text=text, text_color=color)
+            return
+
+    def _merge_download_results(self, packages):
+        by_name = {
+            package.get("FileName"): package
+            for package in packages
+            if package.get("FileName")
+        }
+        for current in self.download_queue:
+            updated = by_name.get(current.get("FileName"))
+            if updated is None:
+                continue
+            widget = current.get("_status_widget")
+            current.clear()
+            current.update(copy.deepcopy(updated))
+            if widget is not None:
+                current["_status_widget"] = widget
+        self._save_download_state()
+        self._update_queue_ui()
     
     def _clear_queue(self):
         self.download_queue.clear()
@@ -5837,7 +6118,32 @@ Fixes "needs to be online" and similar errors.
         if not self.download_queue:
             self._update_status("⚠️ Queue is empty", Theme.WARNING)
             return
-        threading.Thread(target=self._download_worker, daemon=True).start()
+        packages = tuple(
+            self._package_snapshot(package)
+            for package in self.download_queue
+        )
+        plan = {
+            "Packages": packages,
+            "OutputPath": os.path.abspath(self.output_path),
+            "SharedCacheEnabled": bool(self.shared_cache_enabled.get()),
+            "SharedCachePath": os.path.abspath(self.shared_cache_path),
+        }
+        try:
+            self.operation_coordinator.start(
+                "download",
+                lambda context, value=plan: self._download_worker(
+                    context,
+                    value,
+                ),
+                input_summary={
+                    "PackageCount": len(packages),
+                    "OutputPath": plan["OutputPath"],
+                    "SharedCacheEnabled": plan["SharedCacheEnabled"],
+                },
+            )
+        except OperationConflictError as exc:
+            self._update_status("Another operation is already active", Theme.WARNING)
+            self._log("WARNING", str(exc))
 
     def _export_diagnostics_bundle(self):
         try:
@@ -6091,118 +6397,253 @@ Fixes "needs to be online" and similar errors.
         if not intunewin_path:
             return
 
-        threading.Thread(
-            target=self._export_intunewin_worker,
-            args=(tool_path, intunewin_path),
-            daemon=True,
-        ).start()
+        plan = {
+            "ToolPath": os.path.abspath(tool_path),
+            "IntuneWinPath": os.path.abspath(intunewin_path),
+            "Packages": tuple(
+                self._package_snapshot(package)
+                for package in self.download_queue
+            ),
+            "OutputPath": os.path.abspath(self.output_path),
+            "TargetArchitecture": self._target_arch(),
+        }
+        try:
+            self.operation_coordinator.start(
+                "intunewin-export",
+                lambda context, value=plan: self._export_intunewin_worker(
+                    context,
+                    value,
+                ),
+                input_summary={
+                    "PackageCount": len(plan["Packages"]),
+                    "TargetArchitecture": plan["TargetArchitecture"],
+                },
+            )
+        except OperationConflictError as exc:
+            self._update_status("Another operation is already active", Theme.WARNING)
+            self._log("WARNING", str(exc))
 
-    def _export_intunewin_worker(self, tool_path, intunewin_path):
-        self.after(0, lambda: self._update_status("📦 Building IntuneWin package...", Theme.INFO))
-        self.after(0, lambda: self._log("INFO", f"Building IntuneWin package: {intunewin_path}"))
+    def _export_intunewin_worker(self, context, plan):
+        self._post_ui(
+            lambda path=plan["IntuneWinPath"]: self._log(
+                "INFO",
+                f"Building IntuneWin package: {path}",
+            )
+        )
+        context.progress(0.05, "Preparing IntuneWin staging files")
         try:
             generated, detection_script, count = StoreAPI.create_intunewin_package(
-                self.download_queue,
-                self.output_path,
-                intunewin_path,
-                tool_path,
-                self._target_arch(),
+                plan["Packages"],
+                plan["OutputPath"],
+                plan["IntuneWinPath"],
+                plan["ToolPath"],
+                plan["TargetArchitecture"],
+                cancel_event=context.cancel_event,
             )
         except ValueError as exc:
-            self.after(0, lambda e=str(exc): self._update_status("⚠️ Download files first", Theme.WARNING))
-            self.after(0, lambda e=str(exc): self._log("WARNING", e))
+            context.failed("intunewin-export", str(exc))
+            self._post_ui(lambda e=str(exc): self._log("WARNING", e))
         except Exception as exc:
-            self.after(0, lambda: self._update_status("❌ IntuneWin export failed", Theme.DANGER))
-            self.after(0, lambda e=str(exc): self._log("ERROR", f"Failed to build IntuneWin package: {e}"))
+            if context.cancellation_requested:
+                context.cancelled("intunewin-export", str(exc))
+                return OperationState.CANCELLED
+            context.failed("intunewin-export", str(exc))
+            self._post_ui(lambda e=str(exc): self._log("ERROR", f"Failed to build IntuneWin package: {e}"))
         else:
-            self.after(0, lambda: self._update_status("✅ IntuneWin package exported", Theme.SUCCESS))
-            self.after(0, lambda p=generated, d=detection_script, c=count: self._log("SUCCESS", f"IntuneWin package saved: {p} ({c} package(s)); detection script: {d}"))
+            context.succeeded(
+                "intunewin-export",
+                f"Created an IntuneWin archive for {count} package(s)",
+                PackageCount=count,
+            )
+            context.progress(1.0, "IntuneWin export complete")
+            self._post_ui(lambda p=generated, d=detection_script, c=count: self._log("SUCCESS", f"IntuneWin package saved: {p} ({c} package(s)); detection script: {d}"))
     
-    def _download_worker(self):
-        if not os.path.exists(self.output_path):
-            os.makedirs(self.output_path)
-            self.after(0, lambda: self._log("INFO", f"Created output directory: {self.output_path}"))
-        
-        self.after(0, lambda: self._log("INFO", f"Starting download of {len(self.download_queue)} files"))
-        self._save_download_state()
-        
-        total = len(self.download_queue)
-        success_count = 0
-        queue_ui_refresh_needed = False
-        
-        for i, pkg in enumerate(self.download_queue):
+    def _download_worker(self, context, plan):
+        packages = [
+            copy.deepcopy(package)
+            for package in plan["Packages"]
+        ]
+        output_path = plan["OutputPath"]
+        os.makedirs(output_path, exist_ok=True)
+        self._post_ui(
+            lambda path=output_path, count=len(packages): self._log(
+                "INFO",
+                f"Starting download of {count} files to {path}",
+            )
+        )
+        StoreAPI.write_download_state(packages, output_path)
+        total = len(packages)
+
+        for i, pkg in enumerate(packages):
+            if context.cancellation_requested:
+                for remaining in packages[i:]:
+                    filename = remaining.get("FileName") or f"package-{i + 1}"
+                    remaining["DownloadStatus"] = "Partial" if (
+                        remaining.get("LocalPath")
+                        and os.path.exists(f"{remaining['LocalPath']}.part")
+                    ) else "Pending"
+                    context.cancelled(
+                        filename,
+                        "Download was cancelled before this package completed",
+                    )
+                break
             try:
                 validated_package = validate_package_record(pkg, require_url=True)
                 pkg.update(validated_package)
                 fname = validated_package["FileName"]
-                filepath = confined_package_path(self.output_path, fname)
+                filepath = confined_package_path(output_path, fname)
             except PackageIngressError as exc:
+                fname = pkg.get("FileName") or f"package-{i + 1}"
                 pkg["DownloadStatus"] = "Failed"
                 pkg["LastError"] = str(exc)
                 pkg.pop("LocalPath", None)
-                self._save_download_state()
-                if '_status_widget' in pkg:
-                    self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Path blocked", text_color=Theme.DANGER))
-                self.after(0, lambda e=str(exc): self._log("ERROR", f"Rejected unsafe package: {e}"))
+                StoreAPI.write_download_state(packages, output_path)
+                context.failed(fname, str(exc), DownloadStatus="Failed")
+                self._post_ui(
+                    lambda n=fname: self._set_queue_item_status(
+                        n,
+                        "Path blocked",
+                        Theme.DANGER,
+                    )
+                )
+                self._post_ui(lambda e=str(exc): self._log("ERROR", f"Rejected unsafe package: {e}"))
                 continue
-            self.after(0, lambda n=fname: self._update_status(f"⬇️ Downloading {n[:40]}...", Theme.INFO))
-            self.after(0, lambda n=fname, idx=i+1, tot=total: self._log("INFO", f"[{idx}/{tot}] Downloading: {n}"))
-            
-            if '_status_widget' in pkg:
-                self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Downloading...", text_color=Theme.INFO))
-            
+
+            self._post_ui(
+                lambda n=fname, idx=i + 1, tot=total: self._log(
+                    "INFO",
+                    f"[{idx}/{tot}] Downloading: {n}",
+                )
+            )
+            self._post_ui(
+                lambda n=fname: self._set_queue_item_status(
+                    n,
+                    "Downloading…",
+                    Theme.INFO,
+                )
+            )
             pkg['LocalPath'] = filepath
             pkg["DownloadStatus"] = "Downloading"
             pkg.pop("LastError", None)
-            self._save_download_state()
-            
-            def progress_cb(val, idx=i, tot=total):
-                self.after(0, lambda v=(idx + val) / tot: self._update_progress(v))
-            
-            success, error_msg = StoreAPI.download_file(pkg['Url'], filepath, progress_cb, pkg)
-            
-            if '_status_widget' in pkg:
-                if success:
-                    pkg["DownloadStatus"] = "Downloaded"
-                    pkg.pop("LastError", None)
-                    self._save_download_state()
-                    self.after(0, lambda w=pkg['_status_widget']: w.configure(text="✅ Done", text_color=Theme.SUCCESS))
-                    self.after(0, lambda n=fname: self._log("SUCCESS", f"  Downloaded: {n}"))
-                    success_count += 1
-                    if self.shared_cache_enabled.get():
-                        cache_success, cache_msg = StoreAPI.cache_downloaded_artifact(pkg, self.shared_cache_path)
-                        self._save_download_state()
-                        level = "SUCCESS" if cache_success else "WARNING"
-                        self.after(0, lambda lvl=level, m=cache_msg: self._log(lvl, f"  Shared cache: {m}"))
-                else:
-                    if pkg.get("TrustState") == TRUST_STATE_REVIEW_REQUIRED:
-                        pkg["DownloadStatus"] = "Quarantined"
-                        queue_ui_refresh_needed = True
-                    elif pkg.get("TrustState") == TRUST_STATE_BLOCKED:
-                        pkg["DownloadStatus"] = "TrustBlocked"
-                    else:
-                        pkg["DownloadStatus"] = "Partial" if os.path.exists(f"{filepath}.part") else "Failed"
-                    pkg["LastError"] = error_msg
-                    self._save_download_state()
-                    status_text = {
-                        "Quarantined": "Review required",
-                        "TrustBlocked": "Trust blocked",
-                        "Partial": "Partial",
-                    }.get(pkg["DownloadStatus"], "❌ Failed")
-                    status_color = (
-                        Theme.WARNING
-                        if pkg["DownloadStatus"] in {"Partial", "Quarantined"}
-                        else Theme.DANGER
-                    )
-                    self.after(0, lambda w=pkg['_status_widget'], t=status_text, c=status_color: w.configure(text=t, text_color=c))
-                    self.after(0, lambda n=fname, e=error_msg: self._log("ERROR", f"  Failed to download {n}: {e}"))
+            StoreAPI.write_download_state(packages, output_path)
 
-        if queue_ui_refresh_needed:
-            self.after(0, self._update_queue_ui)
-        self.after(0, lambda: self._update_progress(0))
-        self.after(0, lambda: self._update_status("✅ Downloads complete!", Theme.SUCCESS))
-        self.after(0, lambda: self._log("SUCCESS", f"Download complete: {success_count}/{total} files successful"))
-        self.after(0, lambda: self._log("INFO", f"Files saved to: {self.output_path}"))
+            def progress_cb(val, idx=i, tot=total):
+                context.progress(
+                    (idx + val) / tot,
+                    f"Downloading {fname} ({idx + 1}/{tot})",
+                )
+
+            success, error_msg = StoreAPI.download_file(
+                pkg['Url'],
+                filepath,
+                progress_cb,
+                pkg,
+                cancel_event=context.cancel_event,
+            )
+
+            if context.cancellation_requested:
+                pkg["DownloadStatus"] = (
+                    "Partial" if os.path.exists(f"{filepath}.part") else "Pending"
+                )
+                pkg["LastError"] = "Download cancelled"
+                context.cancelled(
+                    fname,
+                    "Download stopped at a resumable checkpoint",
+                    DownloadStatus=pkg["DownloadStatus"],
+                )
+                self._post_ui(
+                    lambda n=fname: self._set_queue_item_status(
+                        n,
+                        "Cancelled",
+                        Theme.WARNING,
+                    )
+                )
+            elif success:
+                pkg["DownloadStatus"] = "Downloaded"
+                pkg.pop("LastError", None)
+                context.succeeded(
+                    fname,
+                    error_msg,
+                    LocalPath=filepath,
+                    TrustState=pkg.get("TrustState", ""),
+                )
+                self._post_ui(
+                    lambda n=fname: self._set_queue_item_status(
+                        n,
+                        "✅ Done",
+                        Theme.SUCCESS,
+                    )
+                )
+                self._post_ui(lambda n=fname: self._log("SUCCESS", f"  Downloaded: {n}"))
+                if plan["SharedCacheEnabled"]:
+                    cache_success, cache_msg = StoreAPI.cache_downloaded_artifact(
+                        pkg,
+                        plan["SharedCachePath"],
+                    )
+                    level = "SUCCESS" if cache_success else "WARNING"
+                    self._post_ui(lambda lvl=level, m=cache_msg: self._log(lvl, f"  Shared cache: {m}"))
+                    if not cache_success:
+                        context.failed(
+                            f"cache:{fname}",
+                            cache_msg,
+                            Package=fname,
+                        )
+            else:
+                if pkg.get("TrustState") == TRUST_STATE_REVIEW_REQUIRED:
+                    pkg["DownloadStatus"] = "Quarantined"
+                elif pkg.get("TrustState") == TRUST_STATE_BLOCKED:
+                    pkg["DownloadStatus"] = "TrustBlocked"
+                else:
+                    pkg["DownloadStatus"] = (
+                        "Partial"
+                        if os.path.exists(f"{filepath}.part")
+                        else "Failed"
+                    )
+                pkg["LastError"] = error_msg
+                context.failed(
+                    fname,
+                    error_msg,
+                    DownloadStatus=pkg["DownloadStatus"],
+                    TrustState=pkg.get("TrustState", ""),
+                )
+                status_text = {
+                    "Quarantined": "Review required",
+                    "TrustBlocked": "Trust blocked",
+                    "Partial": "Partial",
+                }.get(pkg["DownloadStatus"], "❌ Failed")
+                status_color = (
+                    Theme.WARNING
+                    if pkg["DownloadStatus"] in {"Partial", "Quarantined"}
+                    else Theme.DANGER
+                )
+                self._post_ui(
+                    lambda n=fname, text=status_text, color=status_color: (
+                        self._set_queue_item_status(n, text, color)
+                    )
+                )
+                self._post_ui(
+                    lambda n=fname, e=error_msg: self._log(
+                        "ERROR",
+                        f"  Failed to download {n}: {e}",
+                    )
+                )
+            StoreAPI.write_download_state(packages, output_path)
+            if context.cancellation_requested:
+                for remaining in packages[i + 1:]:
+                    key = remaining.get("FileName") or "package"
+                    context.cancelled(
+                        key,
+                        "Download was cancelled before this package started",
+                    )
+                break
+
+        StoreAPI.write_download_state(packages, output_path)
+        self._post_ui(
+            lambda value=copy.deepcopy(packages): (
+                self._merge_download_results(value)
+            )
+        )
+        context.progress(1.0, f"Download operation processed {total} package(s)")
 
     def _rollback_cache_folders(self):
         folders = [self.output_path]
@@ -6238,31 +6679,53 @@ Fixes "needs to be online" and similar errors.
             return
 
         cache_folders = self._rollback_cache_folders()
-        self._update_status("Comparing cached package versions...", Theme.INFO)
-        threading.Thread(target=self._package_diff_worker, args=(identities, cache_folders), daemon=True).start()
+        try:
+            self.operation_coordinator.start(
+                "package-diff",
+                lambda context, ids=tuple(identities), folders=tuple(cache_folders): (
+                    self._package_diff_worker(context, ids, folders)
+                ),
+                input_summary={"IdentityCount": len(identities)},
+            )
+        except OperationConflictError as exc:
+            self._update_status("Another operation is already active", Theme.WARNING)
+            self._log("WARNING", str(exc))
 
-    def _package_diff_worker(self, identities, cache_folders):
+    def _package_diff_worker(self, context, identities, cache_folders):
         identity_set = {identity.lower() for identity in identities if identity}
         candidates = StoreAPI.package_diff_candidates(cache_folders, identity_set)
         if not candidates:
-            self.after(0, lambda: self._update_status("No package diff available", Theme.WARNING))
-            self.after(0, lambda: self._log("WARNING", "Package diff needs two valid cached versions for a queued app identity"))
+            message = "Package diff needs two valid cached versions for a queued app identity"
+            context.failed("package-diff", message)
+            self._post_ui(lambda: self._log("WARNING", message))
             return
 
         sections = []
-        for candidate in candidates:
+        for index, candidate in enumerate(candidates):
+            if context.cancellation_requested:
+                context.cancelled(
+                    candidate.get("PackageIdentity", f"candidate-{index + 1}"),
+                    "Package diff cancelled",
+                )
+                continue
+            context.progress(
+                index / len(candidates),
+                f"Comparing cached packages ({index + 1}/{len(candidates)})",
+            )
+            identity = candidate.get("PackageIdentity", "package")
             try:
                 diff = StoreAPI.diff_appx_manifests(candidate["Old"]["Path"], candidate["New"]["Path"])
                 sections.append(StoreAPI.format_package_diff(diff))
+                context.succeeded(identity, "Package manifests compared")
             except Exception as exc:
-                identity = candidate.get("PackageIdentity", "package")
                 sections.append(f"{identity}\nDiff failed: {exc}")
+                context.failed(identity, str(exc))
 
         report = "\n\n" + ("-" * 60) + "\n\n"
         report = report.join(sections)
-        self.after(0, lambda: self._update_status("Package diff ready", Theme.SUCCESS))
-        self.after(0, lambda c=len(sections): self._log("SUCCESS", f"Package diff generated for {c} cached package pair(s)"))
-        self.after(0, lambda text=report: self._show_package_diff_dialog(text))
+        context.progress(1.0, f"Compared {len(sections)} cached package pair(s)")
+        self._post_ui(lambda c=len(sections): self._log("SUCCESS", f"Package diff generated for {c} cached package pair(s)"))
+        self._post_ui(lambda text=report: self._show_package_diff_dialog(text))
 
     def _show_package_diff_dialog(self, text):
         dialog = ctk.CTkToplevel(self)
@@ -6307,15 +6770,29 @@ Fixes "needs to be online" and similar errors.
             self._log("WARNING", "Rollback needs at least one queued app package identity")
             return
 
-        cache_folders = self._rollback_cache_folders()
-        threading.Thread(target=self._rollback_worker, args=(identities, cache_folders), daemon=True).start()
+        cache_folders = tuple(self._rollback_cache_folders())
+        packages = tuple(
+            self._package_snapshot(package)
+            for package in self.download_queue
+        )
+        try:
+            self.operation_coordinator.start(
+                "rollback",
+                lambda context, ids=tuple(identities), folders=cache_folders, queue=packages: (
+                    self._rollback_worker(context, ids, folders, queue)
+                ),
+                input_summary={"IdentityCount": len(identities)},
+            )
+        except OperationConflictError as exc:
+            self._update_status("Another operation is already active", Theme.WARNING)
+            self._log("WARNING", str(exc))
 
-    def _rollback_worker(self, identities, cache_folders):
-        self.after(0, lambda: self._update_status("Finding cached rollback packages...", Theme.INFO))
+    def _rollback_worker(self, context, identities, cache_folders, packages):
         identity_set = {identity.lower() for identity in identities if identity}
+        context.progress(0.05, "Inspecting installed and cached package versions")
         installed_versions = StoreAPI.get_installed_appx_versions()
         current_versions = {}
-        for package in self.download_queue:
+        for package in packages:
             if not package.get("FileName") or is_dependency_package(package):
                 continue
             identity = (package.get("PackageIdentity") or package_identity(package["FileName"])).lower()
@@ -6333,42 +6810,49 @@ Fixes "needs to be online" and similar errors.
             current_versions,
         )
         if not candidates:
-            self.after(0, lambda: self._update_status("No rollback package found", Theme.WARNING))
-            self.after(0, lambda: self._log("WARNING", "No valid cached previous version was found for queued app identities"))
+            message = "No valid cached previous version was found for queued app identities"
+            context.failed("rollback-plan", message)
+            self._post_ui(lambda: self._log("WARNING", message))
             return
 
-        success_count = 0
-        for candidate in candidates:
+        for index, candidate in enumerate(candidates):
             path = candidate["Path"]
             identity = candidate["RollbackIdentity"]
             version = candidate.get("RollbackVersion", "unknown")
             current = candidate.get("RollbackCurrentVersion") or "unknown"
-            self.after(0, lambda i=identity, v=version: self._update_status(f"Rolling back {i} to {v}...", Theme.INFO))
-            self.after(0, lambda i=identity, c=current, v=version, p=path: self._log("INFO", f"Rollback candidate for {i}: current={c}, rollback={v}, path={p}"))
+            if context.cancellation_requested:
+                context.cancelled(identity, "Rollback cancelled before this package")
+                continue
+            context.progress(
+                index / len(candidates),
+                f"Rolling back {identity} to {version}",
+            )
+            self._post_ui(lambda i=identity, c=current, v=version, p=path: self._log("INFO", f"Rollback candidate for {i}: current={c}, rollback={v}, path={p}"))
 
             signature_ok, signature_msg = StoreAPI.verify_package_signature(
                 path,
                 candidate,
             )
             if not signature_ok:
-                self.after(0, lambda i=identity, m=signature_msg: self._log("ERROR", f"Rollback signature check blocked {i}: {m}"))
+                context.failed(identity, f"Signature blocked: {signature_msg}")
+                self._post_ui(lambda i=identity, m=signature_msg: self._log("ERROR", f"Rollback signature check blocked {i}: {m}"))
                 continue
 
             success, message = StoreAPI.rollback_package(
                 identity,
                 path,
                 candidate,
+                cancel_event=context.cancel_event,
             )
-            if success:
-                success_count += 1
-                self.after(0, lambda i=identity, v=version: self._log("SUCCESS", f"Rolled back {i} to {v}"))
+            if context.cancellation_requested:
+                context.cancelled(identity, message)
+            elif success:
+                context.succeeded(identity, message, RollbackVersion=version)
+                self._post_ui(lambda i=identity, v=version: self._log("SUCCESS", f"Rolled back {i} to {v}"))
             else:
-                self.after(0, lambda i=identity, m=message: self._log("ERROR", f"Rollback failed for {i}: {m}"))
-
-        if success_count:
-            self.after(0, lambda c=success_count: self._update_status(f"Rollback complete: {c} package(s)", Theme.SUCCESS))
-        else:
-            self.after(0, lambda: self._update_status("Rollback failed", Theme.DANGER))
+                context.failed(identity, message)
+                self._post_ui(lambda i=identity, m=message: self._log("ERROR", f"Rollback failed for {i}: {m}"))
+        context.progress(1.0, f"Rollback processed {len(candidates)} package(s)")
     
     def _start_install(self):
         if not IS_ADMIN:
@@ -6381,18 +6865,55 @@ Fixes "needs to be online" and similar errors.
             self._update_status("⚠️ No downloaded files", Theme.WARNING)
             return
         
-        threading.Thread(target=self._install_worker, args=(to_install,), daemon=True).start()
+        packages = tuple(
+            self._package_snapshot(package)
+            for package in to_install
+        )
+        try:
+            self.operation_coordinator.start(
+                "install",
+                lambda context, value=packages: self._install_worker(
+                    context,
+                    value,
+                ),
+                input_summary={
+                    "PackageCount": len(packages),
+                    "TargetArchitecture": self._target_arch(),
+                },
+            )
+        except OperationConflictError as exc:
+            self._update_status("Another operation is already active", Theme.WARNING)
+            self._log("WARNING", str(exc))
     
-    def _install_worker(self, packages):
-        self.after(0, lambda: self._log("INFO", f"Starting installation of {len(packages)} packages"))
-        self.after(0, lambda: self._log("INFO", "Note: Install order matters - dependencies should be installed first"))
-        
-        success_count = 0
-        skipped_count = 0
+    def _install_worker(self, context, packages):
+        packages = [copy.deepcopy(package) for package in packages]
+        self._post_ui(
+            lambda count=len(packages): self._log(
+                "INFO",
+                f"Starting installation of {count} packages",
+            )
+        )
+        self._post_ui(
+            lambda: self._log(
+                "INFO",
+                "Dependencies are installed before application packages.",
+            )
+        )
         total = len(packages)
         
         for i, pkg in enumerate(packages):
+            if context.cancellation_requested:
+                for remaining in packages[i:]:
+                    context.cancelled(
+                        remaining.get("FileName") or "package",
+                        "Installation was cancelled before this package started",
+                    )
+                break
             fname = pkg['FileName']
+            context.progress(
+                i / total,
+                f"Installing {fname} ({i + 1}/{total})",
+            )
             try:
                 filepath = validate_existing_package_path(
                     pkg["LocalPath"],
@@ -6400,26 +6921,45 @@ Fixes "needs to be online" and similar errors.
                     require_file=True,
                 )
             except PackageIngressError as exc:
-                if '_status_widget' in pkg:
-                    self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Path blocked", text_color=Theme.DANGER))
-                self.after(0, lambda n=fname, e=str(exc): self._log("ERROR", f"  Blocked unsafe package path for {n}: {e}"))
+                context.failed(fname, str(exc))
+                self._post_ui(
+                    lambda n=fname: self._set_queue_item_status(
+                        n,
+                        "Path blocked",
+                        Theme.DANGER,
+                    )
+                )
+                self._post_ui(lambda n=fname, e=str(exc): self._log("ERROR", f"  Blocked unsafe package path for {n}: {e}"))
                 continue
             package_name = pkg.get("PackageIdentity") or package_identity(fname)
             available_version = pkg.get("AvailableVersion") or format_version_tuple(package_version_tuple(fname))
             
-            self.after(0, lambda n=fname: self._update_status(f"📦 Installing {n[:40]}...", Theme.INFO))
-            self.after(0, lambda n=fname, idx=i+1, tot=total: self._log("INFO", f"[{idx}/{tot}] Installing: {n}"))
-            self.after(0, lambda p=filepath: self._log("DEBUG", f"  Path: {p}"))
-            
-            if '_status_widget' in pkg:
-                self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Installing...", text_color=Theme.INFO))
+            self._post_ui(lambda n=fname, idx=i+1, tot=total: self._log("INFO", f"[{idx}/{tot}] Installing: {n}"))
+            self._post_ui(lambda p=filepath: self._log("DEBUG", f"  Path: {p}"))
+            self._post_ui(
+                lambda n=fname: self._set_queue_item_status(
+                    n,
+                    "Installing…",
+                    Theme.INFO,
+                )
+            )
 
             should_skip, installed_version, package_name = StoreAPI.should_skip_installed_package(pkg)
             if should_skip:
-                skipped_count += 1
-                if '_status_widget' in pkg:
-                    self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Up to date", text_color=Theme.SUCCESS))
-                self.after(0, lambda n=package_name, i=installed_version, a=available_version: self._log("SUCCESS", f"  Skipped {n}: installed {i} >= available {a}"))
+                context.skipped(
+                    fname,
+                    f"Installed {installed_version} is current",
+                    InstalledVersion=installed_version,
+                    AvailableVersion=available_version,
+                )
+                self._post_ui(
+                    lambda n=fname: self._set_queue_item_status(
+                        n,
+                        "Up to date",
+                        Theme.SUCCESS,
+                    )
+                )
+                self._post_ui(lambda n=package_name, installed=installed_version, available=available_version: self._log("SUCCESS", f"  Skipped {n}: installed {installed} >= available {available}"))
                 continue
 
             signature_ok, signature_msg = StoreAPI.verify_package_signature(
@@ -6427,66 +6967,82 @@ Fixes "needs to be online" and similar errors.
                 pkg,
             )
             if not signature_ok:
-                if '_status_widget' in pkg:
-                    self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Signature blocked", text_color=Theme.DANGER))
-                self.after(0, lambda n=fname, m=signature_msg: self._log("ERROR", f"  Signature verification blocked {n}: {m}"))
+                context.failed(
+                    fname,
+                    f"Signature verification blocked installation: {signature_msg}",
+                    TrustState=pkg.get("TrustState", ""),
+                )
+                self._post_ui(
+                    lambda n=fname: self._set_queue_item_status(
+                        n,
+                        "Signature blocked",
+                        Theme.DANGER,
+                    )
+                )
+                self._post_ui(lambda n=fname, m=signature_msg: self._log("ERROR", f"  Signature verification blocked {n}: {m}"))
                 continue
 
-            self.after(0, lambda m=signature_msg: self._log("DEBUG", f"  Signature verified: {m}"))
+            self._post_ui(lambda m=signature_msg: self._log("DEBUG", f"  Signature verified: {m}"))
             
-            success, error_msg = StoreAPI.install_package(filepath, pkg)
+            success, error_msg = StoreAPI.install_package(
+                filepath,
+                pkg,
+                cancel_event=context.cancel_event,
+            )
             
-            if '_status_widget' in pkg:
-                if success:
-                    self.after(0, lambda w=pkg['_status_widget']: w.configure(text="✅ Installed", text_color=Theme.SUCCESS))
-                    self.after(0, lambda n=fname: self._log("SUCCESS", f"  Successfully installed: {n}"))
-                    success_count += 1
-                else:
-                    if StoreAPI.is_noop_install_error(error_msg):
-                        skipped_count += 1
-                        self.after(0, lambda w=pkg['_status_widget']: w.configure(text="Already current", text_color=Theme.SUCCESS))
-                        self.after(0, lambda n=package_name: self._log("SUCCESS", f"  No-op for {n}: installed version is already newer"))
-                        continue
+            if context.cancellation_requested:
+                context.cancelled(fname, error_msg)
+                self._post_ui(
+                    lambda n=fname: self._set_queue_item_status(
+                        n,
+                        "Cancelled",
+                        Theme.WARNING,
+                    )
+                )
+                for remaining in packages[i + 1:]:
+                    context.cancelled(
+                        remaining.get("FileName") or "package",
+                        "Installation was cancelled before this package started",
+                    )
+                break
+            if success:
+                context.succeeded(fname, error_msg, LocalPath=filepath)
+                self._post_ui(
+                    lambda n=fname: self._set_queue_item_status(
+                        n,
+                        "✅ Installed",
+                        Theme.SUCCESS,
+                    )
+                )
+                self._post_ui(lambda n=fname: self._log("SUCCESS", f"  Successfully installed: {n}"))
+                continue
+            if StoreAPI.is_noop_install_error(error_msg):
+                context.skipped(fname, error_msg)
+                self._post_ui(
+                    lambda n=fname: self._set_queue_item_status(
+                        n,
+                        "Already current",
+                        Theme.SUCCESS,
+                    )
+                )
+                self._post_ui(lambda n=package_name: self._log("SUCCESS", f"  No-op for {n}: installed version is already newer"))
+                continue
 
-                    self.after(0, lambda w=pkg['_status_widget']: w.configure(text="❌ Error", text_color=Theme.DANGER))
-                    self.after(0, lambda n=fname: self._log("ERROR", f"  Failed to install: {n}"))
-                    
-                    # Log detailed error message
-                    error_lines = error_msg.split('\n')
-                    for line in error_lines:
-                        line = line.strip()
-                        if line:
-                            self.after(0, lambda l=line: self._log("ERROR", f"    {l}"))
-                    
-                    # Provide helpful hints based on common errors
-                    error_lower = error_msg.lower()
-                    if "0x80073cf3" in error_lower or "already installed" in error_lower:
-                        self.after(0, lambda: self._log("INFO", "    Hint: App may already be installed or needs update"))
-                    elif "0x80073d19" in error_lower or "dependency" in error_lower:
-                        self.after(0, lambda: self._log("INFO", "    Hint: Missing dependency - install VCLibs and .NET packages first"))
-                    elif "0x80073cff" in error_lower or "sideload" in error_lower:
-                        self.after(0, lambda: self._log("INFO", "    Hint: Enable Developer Mode or Sideloading in Windows Settings"))
-                    elif "0x80073cf9" in error_lower:
-                        self.after(0, lambda: self._log("INFO", "    Hint: Package may require a different Windows version"))
-                    elif "0x80073d02" in error_lower or "in use" in error_lower:
-                        self.after(0, lambda: self._log("INFO", "    Hint: Close the app if it's running and try again"))
-                    elif "access" in error_lower or "denied" in error_lower:
-                        self.after(0, lambda: self._log("INFO", "    Hint: Run as Administrator"))
-                    elif "signature" in error_lower or "certificate" in error_lower:
-                        self.after(0, lambda: self._log("INFO", "    Hint: Package signature issue - try a different version"))
-        
-        self.after(0, lambda: self._update_status("✅ Installation complete!", Theme.SUCCESS))
-        
-        completed_count = success_count + skipped_count
+            context.failed(fname, error_msg)
+            self._post_ui(
+                lambda n=fname: self._set_queue_item_status(
+                    n,
+                    "❌ Error",
+                    Theme.DANGER,
+                )
+            )
+            self._post_ui(lambda n=fname: self._log("ERROR", f"  Failed to install: {n}"))
+            for detail in error_msg.splitlines():
+                detail = detail.strip()
+                if detail:
+                    self._post_ui(lambda value=detail: self._log("ERROR", f"    {value}"))
 
-        if completed_count == total:
-            self.after(0, lambda: self._log("SUCCESS", f"Installation complete: {success_count} installed, {skipped_count} skipped/no-op"))
-        else:
-            self.after(0, lambda: self._log("WARNING", f"Installation complete: {success_count} installed, {skipped_count} skipped/no-op, {total - completed_count} failed"))
-            self.after(0, lambda: self._log("INFO", "Tip: Check the errors above. Common fixes:"))
-            self.after(0, lambda: self._log("INFO", "  1. Install dependencies (VCLibs, .NET) before main apps"))
-            self.after(0, lambda: self._log("INFO", "  2. Enable Developer Mode in Windows Settings"))
-            self.after(0, lambda: self._log("INFO", "  3. Try a different package version (older/newer)"))
+        context.progress(1.0, f"Installation operation processed {total} package(s)")
     
     def _run_repair(self):
         self._inspect_repair_plan("store-repair")
@@ -6501,7 +7057,7 @@ Fixes "needs to be online" and similar errors.
         self._inspect_repair_plan("cache-rebuild")
 
     def _inspect_repair_plan(self, repair_type):
-        if self._repair_operation_active:
+        if self.operation_coordinator.is_active:
             self._update_status(
                 "A repair or restore is already running",
                 Theme.WARNING,
@@ -6703,7 +7259,7 @@ Fixes "needs to be online" and similar errors.
         dialog.after(50, dialog.focus_force)
 
     def _choose_repair_restore(self):
-        if self._repair_operation_active:
+        if self.operation_coordinator.is_active:
             self._update_status(
                 "A repair or restore is already running",
                 Theme.WARNING,
@@ -6840,53 +7396,47 @@ Fixes "needs to be online" and similar errors.
         )
 
     def _start_repair_transaction(self, plan, *, restore):
-        if self._repair_operation_active:
-            return
-        self._repair_cancel_event = threading.Event()
-        self._set_repair_controls_running(True)
         action = "restore" if restore else "repair"
-        self._update_status(
-            f"Running verified {action} transaction…",
-            Theme.INFO,
-        )
+        immutable_plan = copy.deepcopy(plan)
+        try:
+            self.operation_coordinator.start(
+                action,
+                lambda context, value=immutable_plan, is_restore=restore: (
+                    self._repair_transaction_worker(
+                        context,
+                        value,
+                        is_restore,
+                    )
+                ),
+                input_summary={
+                    "PlanOperationId": plan["OperationId"],
+                    "DisplayName": plan["DisplayName"],
+                    "Restore": bool(restore),
+                },
+            )
+        except OperationConflictError as exc:
+            self._update_status("Another operation is already active", Theme.WARNING)
+            self._log("WARNING", str(exc))
+            return
         self._log(
             "INFO",
             (
                 f"{plan['DisplayName']} started "
-                f"(operation {plan['OperationId']})"
+                f"(plan operation {plan['OperationId']})"
             ),
         )
-        threading.Thread(
-            target=self._repair_transaction_worker,
-            args=(plan, restore),
-            daemon=True,
-        ).start()
 
     def _cancel_repair_operation(self):
-        if not self._repair_operation_active or not self._repair_cancel_event:
-            return
-        self._repair_cancel_event.set()
-        self.repair_cancel_button.configure(state="disabled")
-        self._update_status(
-            "Cancellation requested; waiting for a safe checkpoint…",
-            Theme.WARNING,
-        )
-        self._log(
-            "WARNING",
-            "Cancellation requested; the active step will finish first.",
-        )
+        self._cancel_active_operation()
 
-    def _repair_transaction_worker(self, plan, restore):
+    def _repair_transaction_worker(self, operation_context, plan, restore):
         def log_callback(message):
-            self.after(
-                0,
-                lambda value=message: self._log("INFO", value),
-            )
+            self._post_ui(lambda value=message: self._log("INFO", value))
 
         def progress_callback(value):
-            self.after(
-                0,
-                lambda progress=value: self._update_progress(progress),
+            operation_context.progress(
+                value,
+                f"{plan['DisplayName']} is running",
             )
 
         try:
@@ -6896,7 +7446,7 @@ Fixes "needs to be online" and similar errors.
                     confirmation_token=plan["ConfirmationToken"],
                     powershell_exe=POWERSHELL_EXE,
                     is_admin=IS_ADMIN,
-                    cancel_event=self._repair_cancel_event,
+                    cancel_event=operation_context.cancel_event,
                     log_callback=log_callback,
                     progress_callback=progress_callback,
                 )
@@ -6906,7 +7456,7 @@ Fixes "needs to be online" and similar errors.
                     confirmation_token=plan["ConfirmationToken"],
                     powershell_exe=POWERSHELL_EXE,
                     is_admin=IS_ADMIN,
-                    cancel_event=self._repair_cancel_event,
+                    cancel_event=operation_context.cancel_event,
                     log_callback=log_callback,
                     progress_callback=progress_callback,
                 )
@@ -6919,17 +7469,42 @@ Fixes "needs to be online" and similar errors.
                     "Stderr": str(exc),
                 }],
             }
-        self.after(
-            0,
+        for index, result in enumerate(context.get("Results", [])):
+            key = (
+                result.get("Description")
+                or result.get("StepId")
+                or f"step-{index + 1}"
+            )
+            detail = result.get("Stderr") or result.get("Stdout") or ""
+            if result.get("Success"):
+                operation_context.succeeded(key, detail)
+            elif str(context.get("Outcome", "")).startswith("cancelled"):
+                operation_context.cancelled(key, detail or "Step cancelled")
+            else:
+                operation_context.failed(key, detail or "Step failed")
+        self._post_ui(
             lambda value=context, is_restore=restore: (
                 self._finish_repair_transaction(value, is_restore)
-            ),
+            )
         )
+        outcome = str(context.get("Outcome", "failed"))
+        if outcome == "succeeded":
+            return OperationState.SUCCEEDED
+        if outcome.startswith("cancelled"):
+            completed = (
+                operation_context.result.counts["Succeeded"]
+                + operation_context.result.counts["Skipped"]
+            )
+            return (
+                OperationState.PARTIAL
+                if completed
+                else OperationState.CANCELLED
+            )
+        if not operation_context.result.items:
+            return OperationState.FAILED
+        return operation_context.result.inferred_terminal_state()
 
     def _finish_repair_transaction(self, context, restore):
-        self._update_progress(0)
-        self._set_repair_controls_running(False)
-        self._repair_cancel_event = None
         outcome = context.get("Outcome", "failed")
         action = "Restore" if restore else "Repair"
         backup_root = context.get("BackupRoot")
@@ -6942,28 +7517,16 @@ Fixes "needs to be online" and similar errors.
             detail = result.get("Stderr") or result.get("Stdout") or ""
             self._log("ERROR", f"{description}: {detail}")
         if outcome == "succeeded":
-            self._update_status(
-                f"{action} transaction verified",
-                Theme.SUCCESS,
-            )
             self._log(
                 "SUCCESS",
                 f"{action} completed with all postconditions verified.",
             )
         elif outcome.startswith("cancelled"):
-            self._update_status(
-                f"{action} stopped at a safe checkpoint",
-                Theme.WARNING,
-            )
             self._log(
                 "WARNING",
                 f"{action} outcome: {outcome}",
             )
         else:
-            self._update_status(
-                f"{action} stopped: {outcome}",
-                Theme.DANGER,
-            )
             self._log(
                 "ERROR",
                 (
@@ -7189,7 +7752,7 @@ def _cli_search(query, args, stdout, stderr):
     return 0 if results else 1
 
 
-def _cli_download_selected(packages, output_path, stderr):
+def _cli_download_selected(packages, output_path, stderr, context=None):
     records = []
     downloaded = []
     os.makedirs(output_path, exist_ok=True)
@@ -7199,11 +7762,18 @@ def _cli_download_selected(packages, output_path, stderr):
             filename = package["FileName"]
             path = confined_package_path(output_path, filename)
         except PackageIngressError as exc:
+            key = (
+                package.get("FileName", "package")
+                if isinstance(package, dict)
+                else "package"
+            )
             records.append(_cli_package_record(
                 package if isinstance(package, dict) else {},
                 "failed",
                 str(exc),
             ))
+            if context is not None:
+                context.failed(key, str(exc))
             _cli_print(f"download blocked: {exc}", stderr)
             continue
         ok, message = StoreAPI.download_file(package.get("Url", ""), path, package=package)
@@ -7211,6 +7781,8 @@ def _cli_download_selected(packages, output_path, stderr):
             package["LocalPath"] = path
             downloaded.append(package)
             records.append(_cli_package_record(package, "downloaded", message, path))
+            if context is not None:
+                context.succeeded(filename, message)
         else:
             _cli_print(f"download failed: {filename}: {message}", stderr)
             status = {
@@ -7218,10 +7790,16 @@ def _cli_download_selected(packages, output_path, stderr):
                 TRUST_STATE_BLOCKED: "trust-blocked",
             }.get(package.get("TrustState"), "failed")
             records.append(_cli_package_record(package, status, message, path))
+            if context is not None:
+                context.failed(
+                    filename,
+                    message,
+                    TrustState=package.get("TrustState", ""),
+                )
     return downloaded, records
 
 
-def _cli_install_downloaded(packages, records, stderr):
+def _cli_install_downloaded(packages, records, stderr, context=None):
     success_count = 0
     skipped_count = 0
     failed_count = 0
@@ -7243,12 +7821,24 @@ def _cli_install_downloaded(packages, records, stderr):
                 str(exc),
                 "",
             )
+            if context is not None:
+                context.failed(
+                    package.get("FileName", "package")
+                    if isinstance(package, dict)
+                    else "package",
+                    str(exc),
+                )
             continue
 
         should_skip, installed_version, package_name = StoreAPI.should_skip_installed_package(package)
         if should_skip:
             skipped_count += 1
             _cli_set_package_record(records, package, "skipped", f"installed {installed_version} is current", local_path)
+            if context is not None:
+                context.skipped(
+                    package["FileName"],
+                    f"Installed {installed_version} is current",
+                )
             continue
 
         signature_ok, signature_message = StoreAPI.verify_package_signature(
@@ -7259,22 +7849,33 @@ def _cli_install_downloaded(packages, records, stderr):
             failed_count += 1
             _cli_print(f"signature blocked: {package.get('FileName')}: {signature_message}", stderr)
             _cli_set_package_record(records, package, "failed", f"signature blocked: {signature_message}", local_path)
+            if context is not None:
+                context.failed(
+                    package["FileName"],
+                    f"Signature blocked: {signature_message}",
+                )
             continue
 
         ok, install_message = StoreAPI.install_package(local_path, package)
         if ok:
             success_count += 1
             _cli_set_package_record(records, package, "installed", install_message, local_path)
+            if context is not None:
+                context.succeeded(package["FileName"], install_message)
             continue
 
         if StoreAPI.is_noop_install_error(install_message):
             skipped_count += 1
             _cli_set_package_record(records, package, "skipped", f"{package_name}: {install_message}", local_path)
+            if context is not None:
+                context.skipped(package["FileName"], install_message)
             continue
 
         failed_count += 1
         _cli_print(f"install failed: {package.get('FileName')}: {install_message}", stderr)
         _cli_set_package_record(records, package, "failed", install_message, local_path)
+        if context is not None:
+            context.failed(package["FileName"], install_message)
 
     return success_count, skipped_count, failed_count
 
@@ -7302,36 +7903,67 @@ def _cli_package_workflow(args, stdout, stderr):
         _cli_print(f"error: no installable packages were selected for {app.get('Name')}", stderr)
         return 1
 
-    downloaded, records = _cli_download_selected(selected, os.path.abspath(args.output), stderr)
     action = "install" if args.install else "download"
+    output_path = os.path.abspath(args.output)
     summary = {
         "Action": action,
         "App": app,
         "TargetArchitecture": target_arch,
-        "OutputPath": os.path.abspath(args.output),
+        "OutputPath": output_path,
         "StoreQuery": diagnostic.get("Query", StoreAPI.package_query_metadata(app["ProductId"], args.ring, args.language, args.market)),
         "Errors": errors,
-        "Packages": records,
+        "Packages": [],
     }
 
-    if len(downloaded) != len(selected):
-        _cli_emit_summary(summary, args.json, stdout)
-        return 1
+    workflow = {}
 
-    if args.install:
+    def run_package_operation(context):
+        downloaded, records = _cli_download_selected(
+            selected,
+            output_path,
+            stderr,
+            context,
+        )
+        workflow["Downloaded"] = downloaded
+        workflow["Records"] = records
+        if len(downloaded) != len(selected):
+            return context.result.inferred_terminal_state()
+        if not args.install:
+            return context.result.inferred_terminal_state()
         if not IS_ADMIN:
-            _cli_print("error: administrator rights are required for --install", stderr)
-            _cli_emit_summary(summary, args.json, stdout)
-            return 2
-        installed, skipped, failed = _cli_install_downloaded(downloaded, records, stderr)
-        summary["Installed"] = installed
-        summary["Skipped"] = skipped
-        summary["Failed"] = failed
-        _cli_emit_summary(summary, args.json, stdout)
-        return 0 if failed == 0 else 1
+            message = "Administrator rights are required for --install"
+            _cli_print(f"error: {message.lower()}", stderr)
+            context.failed("privilege", message)
+            return context.result.inferred_terminal_state()
+        installed, skipped, failed = _cli_install_downloaded(
+            downloaded,
+            records,
+            stderr,
+            context,
+        )
+        workflow["Installed"] = installed
+        workflow["Skipped"] = skipped
+        workflow["Failed"] = failed
+        return context.result.inferred_terminal_state()
 
+    result = OperationCoordinator(
+        journal=OperationJournal(OPERATION_JOURNAL_PATH),
+    ).run(
+        action,
+        run_package_operation,
+        input_summary={
+            "ProductId": app["ProductId"],
+            "TargetArchitecture": target_arch,
+            "PackageCount": len(selected),
+        },
+    )
+    summary["Packages"] = workflow.get("Records", [])
+    for name in ("Installed", "Skipped", "Failed"):
+        if name in workflow:
+            summary[name] = workflow[name]
+    summary["Operation"] = result.to_dict()
     _cli_emit_summary(summary, args.json, stdout)
-    return 0
+    return result.exit_code
 
 
 def _cli_mirror(args, stdout, stderr):

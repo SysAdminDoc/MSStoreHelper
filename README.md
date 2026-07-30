@@ -55,6 +55,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - **App Installer Export** - Writes `.appinstaller` manifests plus package folders for lightweight App Installer deployments
 - 📦 **IntuneWin Export** - Packages downloaded queue items with install and detection scripts for Intune Win32 apps
 - 📋 **Verbose Console** - Detailed logging with error hints and troubleshooting tips
+- **Truthful Operations** - Serializes conflicting work, supports safe cancellation and shutdown, reports partial success consistently, and retains a bounded telemetry-free journal under `%APPDATA%\MSStoreHelper`
 
 ---
 

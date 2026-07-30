@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 
 from MSStoreHelper import StoreAPI
 from diagnostic_bundle import (
@@ -12,9 +13,24 @@ from diagnostic_bundle import (
     diagnostic_preview_text,
     write_prepared_bundle,
 )
+from operation_coordinator import OperationCoordinator, OperationJournal
 
 
 class DiagnosticsBundleTests(unittest.TestCase):
+    def setUp(self):
+        self._journal_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._journal_dir.cleanup)
+        self.journal_path = os.path.join(
+            self._journal_dir.name,
+            "operation-journal.json",
+        )
+        self._journal_patch = patch(
+            "MSStoreHelper.OPERATION_JOURNAL_PATH",
+            self.journal_path,
+        )
+        self._journal_patch.start()
+        self.addCleanup(self._journal_patch.stop)
+
     def test_redact_diagnostic_text_removes_paths_and_secrets(self):
         temp_path = os.path.join(tempfile.gettempdir(), "msstorehelper-secret.txt")
         text = f"{temp_path}\napi_key=abc123\nauthorization: BearerToken"
@@ -121,6 +137,15 @@ class DiagnosticsBundleTests(unittest.TestCase):
             bundle_path = os.path.join(temp_dir, "diagnostics.zip")
             local_path = os.path.join(temp_dir, "App_1.0.0.0_x64__test.msixbundle")
             log_text = f"[12:00:00] INFO Command: Add-AppxPackage {local_path}\npassword=secret"
+            OperationCoordinator(
+                journal=OperationJournal(self.journal_path),
+            ).run(
+                "download",
+                lambda context: context.succeeded(
+                    "package.msix",
+                    "Downloaded",
+                ),
+            )
 
             StoreAPI.write_diagnostics_bundle(
                 bundle_path,
@@ -145,13 +170,19 @@ class DiagnosticsBundleTests(unittest.TestCase):
                 self.assertIn("queue.json", names)
                 self.assertIn("app-log.txt", names)
                 self.assertIn("powershell-transcript.txt", names)
+                self.assertIn("operation-history.json", names)
                 diagnostics = json.loads(archive.read("diagnostics.json"))
                 queue = json.loads(archive.read("queue.json"))
+                operation_history = json.loads(
+                    archive.read("operation-history.json")
+                )
                 app_log = archive.read("app-log.txt").decode("utf-8")
                 transcript = archive.read("powershell-transcript.txt").decode("utf-8")
 
             self.assertEqual(diagnostics["AppVersion"], "9.9.9")
             self.assertEqual(diagnostics["QueueCount"], 1)
+            self.assertEqual(diagnostics["OperationHistoryCount"], 1)
+            self.assertEqual(operation_history[0]["State"], "succeeded")
             self.assertEqual(queue[0]["StoreQuery"]["Language"], "pt-BR")
             self.assertNotIn(temp_dir, json.dumps(queue))
             self.assertNotIn("password=secret", app_log)

@@ -314,7 +314,7 @@ class PackageTrustTests(unittest.TestCase):
             write_appx(path)
 
             with patch(
-                "MSStoreHelper.subprocess.run",
+                "MSStoreHelper.run_command",
                 return_value=result,
             ) as run_mock:
                 evidence = StoreAPI.query_package_signature(path)
@@ -403,7 +403,7 @@ class PackageTrustTests(unittest.TestCase):
                 )[0]
             )
 
-            with patch("MSStoreHelper.subprocess.run") as run_mock:
+            with patch("MSStoreHelper.run_command") as run_mock:
                 install_ok, _message = StoreAPI.install_package(path, package)
                 rollback_ok, _message = StoreAPI.rollback_package(
                     "Microsoft.WindowsTerminal",

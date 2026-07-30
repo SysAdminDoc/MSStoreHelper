@@ -357,7 +357,7 @@ class PackageIngressTests(unittest.TestCase):
             mark_package_trusted(package, package_path_value)
             result = SimpleNamespace(returncode=0, stdout="", stderr="")
 
-            with patch("MSStoreHelper.subprocess.run", return_value=result) as run_mock:
+            with patch("MSStoreHelper.run_command", return_value=result) as run_mock:
                 ok, message = StoreAPI.install_package(
                     package_path_value,
                     package,
@@ -382,7 +382,7 @@ class PackageIngressTests(unittest.TestCase):
             with open(package_path_value, "wb") as handle:
                 handle.write(b"package")
 
-            with patch("MSStoreHelper.subprocess.run") as run_mock:
+            with patch("MSStoreHelper.run_command") as run_mock:
                 ok, message = StoreAPI.rollback_package(
                     "Contoso.App'; Start-Process calc",
                     package_path_value,
