@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 import uuid
@@ -13,9 +12,28 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
+from state_repository import (
+    JsonStateSpec,
+    StateRepositoryError,
+    load_json_state,
+    update_json_state,
+)
+
 
 OPERATION_SCHEMA_VERSION = 1
 DEFAULT_JOURNAL_LIMIT = 200
+OPERATION_JOURNAL_SPEC = JsonStateSpec(
+    name="operation journal",
+    current_version=OPERATION_SCHEMA_VERSION,
+    default_factory=lambda: {"Operations": []},
+    migrations={
+        0: lambda payload: {
+            "SchemaVersion": OPERATION_SCHEMA_VERSION,
+            "Operations": list(payload.get("Operations") or []),
+        },
+    },
+    validator=lambda value: isinstance(value.get("Operations"), list),
+)
 
 
 def utc_timestamp() -> str:
@@ -181,54 +199,36 @@ class OperationJournal:
     def __init__(self, path: str | os.PathLike[str], *, limit: int = DEFAULT_JOURNAL_LIMIT):
         self.path = Path(path).resolve()
         self.limit = max(1, min(5000, int(limit)))
-        self._lock = threading.Lock()
 
-    def _read_unlocked(self) -> list[dict[str, Any]]:
-        if not self.path.exists():
-            return []
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
-        if (
-            not isinstance(payload, dict)
-            or payload.get("SchemaVersion") != OPERATION_SCHEMA_VERSION
-            or not isinstance(payload.get("Operations"), list)
-        ):
-            raise ValueError("operation journal schema is invalid")
+    def snapshot(self) -> list[dict[str, Any]]:
+        payload = load_json_state(
+            self.path,
+            OPERATION_JOURNAL_SPEC,
+        ).data
         return [
             item for item in payload["Operations"]
             if isinstance(item, dict)
         ]
 
-    def snapshot(self) -> list[dict[str, Any]]:
-        with self._lock:
-            return self._read_unlocked()
-
     def append(self, result: OperationResult) -> None:
         if not result.is_terminal:
             raise ValueError("only terminal operation results can be journaled")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock:
-            operations = self._read_unlocked()
+
+        def update(payload):
+            operations = [
+                item
+                for item in payload.get("Operations", [])
+                if isinstance(item, dict)
+            ]
             operations.append(result.to_dict())
-            operations = operations[-self.limit :]
-            payload = {
-                "SchemaVersion": OPERATION_SCHEMA_VERSION,
-                "Operations": operations,
-            }
-            temporary = self.path.with_name(
-                f".{self.path.name}.{uuid.uuid4().hex}.tmp"
-            )
-            try:
-                with temporary.open("x", encoding="utf-8", newline="\n") as stream:
-                    json.dump(payload, stream, indent=2, sort_keys=True)
-                    stream.write("\n")
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, self.path)
-            finally:
-                try:
-                    temporary.unlink()
-                except FileNotFoundError:
-                    pass
+            payload["Operations"] = operations[-self.limit :]
+            return payload
+
+        update_json_state(
+            self.path,
+            OPERATION_JOURNAL_SPEC,
+            update,
+        )
 
 
 class OperationContext:
@@ -404,7 +404,7 @@ class OperationCoordinator:
         if self.journal:
             try:
                 self.journal.append(result)
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
+            except (OSError, ValueError, StateRepositoryError) as exc:
                 result.input_summary["JournalError"] = str(exc)
                 self._emit()
 

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from MSStoreHelper import StoreAPI
+from state_repository import pop_recovery_notices
 
 
 class UserProfileTests(unittest.TestCase):
@@ -40,6 +41,8 @@ class UserProfileTests(unittest.TestCase):
 
             self.assertEqual(loaded["SearchHistory"], ["terminal"])
             self.assertEqual(loaded["PinnedFavorites"][0]["ProductId"], "9N0DX20HK701")
+            with open(profile_path, "r", encoding="utf-8") as handle:
+                self.assertIn('"SchemaVersion": 1', handle.read())
 
     def test_user_profile_round_trips_store_query_settings(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -83,6 +86,24 @@ class UserProfileTests(unittest.TestCase):
             loaded = StoreAPI.load_user_profile(profile_path)
 
             self.assertEqual(loaded["RepairRetentionCount"], 50)
+
+    def test_corrupt_profile_is_quarantined_before_defaults_load(self):
+        pop_recovery_notices()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_path = os.path.join(temp_dir, "profile.json")
+            with open(profile_path, "w", encoding="utf-8") as handle:
+                handle.write("{truncated")
+
+            loaded = StoreAPI.load_user_profile(profile_path)
+            notices = pop_recovery_notices()
+
+            self.assertEqual(loaded, StoreAPI.default_user_profile())
+            self.assertEqual(len(notices), 1)
+            self.assertEqual(notices[0].state_name, "user profile")
+            self.assertFalse(os.path.exists(profile_path))
+            self.assertTrue(
+                os.path.exists(notices[0].quarantine_path)
+            )
 
 
 if __name__ == "__main__":

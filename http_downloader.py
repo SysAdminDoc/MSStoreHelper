@@ -8,9 +8,7 @@ import json
 import os
 import re
 import shutil
-import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
@@ -19,6 +17,10 @@ from package_ingress import (
     validate_package_filename,
     validate_package_url,
     validate_response_redirects,
+)
+from state_repository import (
+    InterProcessFileLock,
+    atomic_write_json as atomic_state_write_json,
 )
 
 
@@ -94,23 +96,7 @@ def _hash_existing(path: str) -> Any:
 
 
 def _atomic_write_json(path: str, payload: dict[str, Any]) -> None:
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(
-        f".{destination.name}.{uuid.uuid4().hex}.tmp"
-    )
-    try:
-        with temporary.open("x", encoding="utf-8", newline="\n") as stream:
-            json.dump(payload, stream, indent=2, sort_keys=True)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, destination)
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+    atomic_state_write_json(path, payload)
 
 
 def _remove_partial(part_path: str, state_path: str) -> None:
@@ -235,7 +221,7 @@ def validated_content_length(
     return length
 
 
-def download_http_file(
+def _download_http_file_serialized(
     url: str,
     filepath: str,
     *,
@@ -524,3 +510,35 @@ def download_http_file(
             }
 
     raise HttpDownloadError("Download could not establish a safe response")
+
+
+def download_http_file(
+    url: str,
+    filepath: str,
+    *,
+    filename: str,
+    source_identity: str,
+    get: Callable[..., Any],
+    progress_callback: Callable[[float], None] | None = None,
+    cancel_event: Any = None,
+    max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
+    free_space_reserve_bytes: int = DEFAULT_FREE_SPACE_RESERVE_BYTES,
+    timeout: float = 60,
+    request_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Serialize writers for one destination across app processes."""
+    operation_lock = f"{os.path.abspath(filepath)}.download"
+    with InterProcessFileLock(operation_lock):
+        return _download_http_file_serialized(
+            url,
+            filepath,
+            filename=filename,
+            source_identity=source_identity,
+            get=get,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+            max_bytes=max_bytes,
+            free_space_reserve_bytes=free_space_reserve_bytes,
+            timeout=timeout,
+            request_headers=request_headers,
+        )

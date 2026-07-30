@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -159,9 +160,27 @@ class OfflineCacheTests(unittest.TestCase):
                 paths.append(path)
 
             manifest = StoreAPI.load_cache_manifest(cache_dir)
-            history = manifest["History"]["contoso.app"]
+            history = next(iter(manifest["History"].values()))
 
             self.assertEqual([item["AvailableVersion"] for item in history], ["3.0.0.0", "2.0.0.0"])
+            dimensions = history[0]["CacheDimensions"]
+            self.assertEqual(
+                set(dimensions),
+                {
+                    "Identity",
+                    "Architecture",
+                    "PackageType",
+                    "Version",
+                    "Ring",
+                    "Language",
+                    "Market",
+                    "Source",
+                },
+            )
+            self.assertEqual(dimensions["Architecture"], "x64")
+            self.assertEqual(dimensions["PackageType"], "MSIXBUNDLE")
+            self.assertEqual(len(history[0]["CacheKey"]), 64)
+            self.assertEqual(len(history[0]["CompatibilityKey"]), 64)
             self.assertNotIn(os.path.basename(paths[0]), manifest["Artifacts"])
             self.assertFalse(os.path.exists(paths[0]))
             self.assertTrue(os.path.exists(paths[1]))
@@ -200,6 +219,121 @@ class OfflineCacheTests(unittest.TestCase):
             candidates = StoreAPI.rollback_candidates([cache_dir], ["Contoso.App"], {})
 
             self.assertEqual(candidates[0]["RollbackVersion"], "1.0.0.0")
+
+    def test_cache_selection_never_crosses_architecture_or_store_ring(self):
+        with tempfile.TemporaryDirectory() as cache_dir:
+            variants = (
+                ("x64", "Retail", ("1.0.0.0", "2.0.0.0")),
+                ("x86", "Retail", ("7.0.0.0", "8.0.0.0")),
+                ("x64", "WIS", ("9.0.0.0", "10.0.0.0")),
+            )
+            for architecture, ring, versions in variants:
+                for version in versions:
+                    path = os.path.join(
+                        cache_dir,
+                        (
+                            f"Contoso.App_{version}_{architecture}"
+                            "__test.msix"
+                        ),
+                    )
+                    with open(path, "wb") as handle:
+                        handle.write(
+                            f"{architecture}-{ring}-{version}".encode(
+                                "ascii"
+                            )
+                        )
+                    package = {
+                        "FileName": os.path.basename(path),
+                        "StoreQuery": {
+                            "ProductId": "9CONTOSO",
+                            "Ring": ring,
+                            "Language": "en-US",
+                            "Market": "US",
+                        },
+                    }
+                    mark_package_trusted(package, path)
+                    StoreAPI.write_artifact_manifest(
+                        package,
+                        path,
+                        cache_dir,
+                    )
+
+            query = {
+                "Ring": "Retail",
+                "Language": "en-US",
+                "Market": "US",
+            }
+            rollback = StoreAPI.rollback_candidates(
+                [cache_dir],
+                ["Contoso.App"],
+                {"contoso.app": "3.0.0.0"},
+                target_arch="x64",
+                store_query=query,
+            )
+            diffs = StoreAPI.package_diff_candidates(
+                [cache_dir],
+                ["Contoso.App"],
+                target_arch="x64",
+                store_query=query,
+            )
+
+            self.assertEqual(len(rollback), 1)
+            self.assertEqual(rollback[0]["RollbackVersion"], "2.0.0.0")
+            self.assertEqual(
+                rollback[0]["CacheDimensions"]["Architecture"],
+                "x64",
+            )
+            self.assertEqual(
+                rollback[0]["CacheDimensions"]["Ring"],
+                "retail",
+            )
+            self.assertEqual(len(diffs), 1)
+            self.assertEqual(diffs[0]["Old"]["AvailableVersion"], "1.0.0.0")
+            self.assertEqual(diffs[0]["New"]["AvailableVersion"], "2.0.0.0")
+            self.assertEqual(
+                diffs[0]["Old"]["CompatibilityKey"],
+                diffs[0]["New"]["CompatibilityKey"],
+            )
+
+    def test_concurrent_cache_updates_preserve_every_identity(self):
+        with tempfile.TemporaryDirectory() as cache_dir:
+            packages = []
+            for index in range(8):
+                path = os.path.join(
+                    cache_dir,
+                    f"Contoso.App{index}_1.0.0.0_x64__test.msix",
+                )
+                with open(path, "wb") as handle:
+                    handle.write(f"package-{index}".encode("ascii"))
+                package = {"FileName": os.path.basename(path)}
+                mark_package_trusted(package, path)
+                packages.append((package, path))
+
+            failures = []
+
+            def persist(package, path):
+                try:
+                    StoreAPI.write_artifact_manifest(
+                        package,
+                        path,
+                        cache_dir,
+                    )
+                except Exception as exc:
+                    failures.append(exc)
+
+            threads = [
+                threading.Thread(target=persist, args=item)
+                for item in packages
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            manifest = StoreAPI.load_cache_manifest(cache_dir)
+            self.assertEqual(failures, [])
+            self.assertEqual(len(manifest["Artifacts"]), len(packages))
+            self.assertEqual(len(manifest["History"]), len(packages))
 
     def test_rollback_package_runs_remove_then_add(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -352,7 +486,11 @@ class OfflineCacheTests(unittest.TestCase):
 
             StoreAPI.write_download_state([package], temp_dir, state_path)
             loaded = StoreAPI.load_download_state(state_path)
+            with open(state_path, "r", encoding="utf-8") as handle:
+                persisted = json.load(handle)
 
+            self.assertEqual(persisted["SchemaVersion"], 2)
+            self.assertEqual(persisted["Version"], 2)
             self.assertEqual(loaded["OutputPath"], os.path.abspath(temp_dir))
             self.assertEqual(loaded["Queue"][0]["FileName"], package["FileName"])
             self.assertEqual(loaded["Queue"][0]["DownloadStatus"], "Partial")

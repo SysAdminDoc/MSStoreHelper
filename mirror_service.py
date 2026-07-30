@@ -16,6 +16,11 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlsplit
 
+from state_repository import (
+    InterProcessFileLock,
+    atomic_write_json as _atomic_state_write_json,
+)
+
 
 MIRROR_AUDIT_FILENAME = "msstorehelper-mirror-access.jsonl"
 MIRROR_AUDIT_MAX_BYTES = 1024 * 1024
@@ -23,9 +28,6 @@ MIRROR_AUDIT_RETENTION = 3
 DEFAULT_TOKEN_TTL_SECONDS = 15 * 60
 MIN_TOKEN_TTL_SECONDS = 60
 MAX_TOKEN_TTL_SECONDS = 60 * 60
-_INDEX_WRITE_LOCK = threading.Lock()
-
-
 class MirrorConfigurationError(ValueError):
     """Raised when mirror exposure would violate the network policy."""
 
@@ -179,33 +181,7 @@ def create_bearer_token():
 
 
 def atomic_write_json(path, payload):
-    path = os.path.abspath(path)
-    folder = os.path.dirname(path)
-    os.makedirs(folder, exist_ok=True)
-    temp_path = os.path.join(
-        folder,
-        f".{os.path.basename(path)}.{uuid.uuid4().hex}.tmp",
-    )
-    with _INDEX_WRITE_LOCK:
-        try:
-            with open(
-                temp_path,
-                "x",
-                encoding="utf-8",
-                newline="\n",
-            ) as handle:
-                json.dump(payload, handle, indent=2, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_path, path)
-        finally:
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
-    return path
+    return _atomic_state_write_json(path, payload)
 
 
 def _redact_client_address(value):
@@ -264,6 +240,7 @@ class MirrorAuditLog:
         request_id,
     ):
         record = {
+            "SchemaVersion": 1,
             "Timestamp": utc_timestamp(),
             "RequestId": str(request_id),
             "ClientNetwork": _redact_client_address(client),
@@ -275,17 +252,18 @@ class MirrorAuditLog:
         }
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         with self._lock:
-            self._rotate()
-            with open(
-                self.path,
-                "a",
-                encoding="utf-8",
-                newline="\n",
-            ) as handle:
-                handle.write(json.dumps(record, sort_keys=True))
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+            with InterProcessFileLock(self.path):
+                self._rotate()
+                with open(
+                    self.path,
+                    "a",
+                    encoding="utf-8",
+                    newline="\n",
+                ) as handle:
+                    handle.write(json.dumps(record, sort_keys=True))
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
 
 
 def parse_byte_range(value, size):

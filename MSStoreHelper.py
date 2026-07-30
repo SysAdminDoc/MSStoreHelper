@@ -92,7 +92,6 @@ from mirror_service import (
     MIRROR_AUDIT_FILENAME,
     MirrorAuditLog,
     MirrorConfigurationError,
-    atomic_write_json,
     create_bearer_token,
     make_mirror_handler,
     mirror_base_url,
@@ -107,6 +106,16 @@ from store_sources import (
     package_lookup_fallbacks,
     request_with_retries,
     source_status_summary,
+)
+from state_repository import (
+    JsonStateSpec,
+    append_jsonl,
+    atomic_write_json as atomic_state_write_json,
+    load_json_state,
+    pop_recovery_notices,
+    remove_state_file,
+    save_json_state,
+    update_json_state,
 )
 from command_runner import run_command
 from http_downloader import (
@@ -537,6 +546,252 @@ XBOX_CORE_PACKAGE_PINS = [
     },
 ]
 
+
+def _profile_migrate_v0(payload):
+    value = dict(payload)
+    value.setdefault("SearchHistory", [])
+    value.setdefault("PinnedFavorites", [])
+    value.setdefault("ThemeMode", "System")
+    value.setdefault("StoreRing", "Retail")
+    value.setdefault("StoreLanguage", "en-US")
+    value.setdefault("StoreMarket", "US")
+    value.setdefault("KeepUpdatedEnabled", False)
+    value.setdefault("KeepUpdatedLastScan", "")
+    value.setdefault(
+        "RepairRetentionCount",
+        DEFAULT_REPAIR_RETENTION,
+    )
+    value["SchemaVersion"] = 1
+    return value
+
+
+def _download_migrate_v0(payload):
+    value = dict(payload)
+    value.setdefault("OutputPath", DEFAULT_OUTPUT)
+    value.setdefault("Queue", [])
+    value["Version"] = 1
+    value["SchemaVersion"] = 1
+    return value
+
+
+def _download_migrate_v1(payload):
+    value = dict(payload)
+    value.setdefault("OutputPath", DEFAULT_OUTPUT)
+    value.setdefault("Queue", [])
+    value["Version"] = 2
+    value["SchemaVersion"] = 2
+    return value
+
+
+def _cache_architecture(metadata):
+    architecture = str(metadata.get("Architecture") or "").strip().lower()
+    if architecture:
+        return architecture
+    filename = str(metadata.get("FileName") or "").lower()
+    for candidate in ("arm64", "x64", "x86", "arm", "neutral"):
+        if f"_{candidate}_" in filename:
+            return candidate
+    return "unknown"
+
+
+def _cache_dimensions(metadata):
+    query = metadata.get("StoreQuery") or {}
+    filename = str(metadata.get("FileName") or "")
+    file_type = str(
+        metadata.get("FileType")
+        or os.path.splitext(filename)[1].lstrip(".")
+        or "unknown"
+    ).upper()
+    version = str(metadata.get("AvailableVersion") or "").strip()
+    if not version and filename:
+        version = format_version_tuple(package_version_tuple(filename))
+    source = str(
+        metadata.get("ExpectedProductId")
+        or query.get("ProductId")
+        or ""
+    ).strip().lower()
+    if not source:
+        source_url = str(
+            (metadata.get("DownloadEvidence") or {}).get("EffectiveUrl")
+            or metadata.get("Url")
+            or ""
+        )
+        try:
+            source = urlsplit(source_url).netloc.lower()
+        except ValueError:
+            source = ""
+    return {
+        "Identity": str(
+            metadata.get("PackageIdentity")
+            or package_identity(filename)
+            or "unknown"
+        ).strip().lower(),
+        "Architecture": _cache_architecture(metadata),
+        "PackageType": file_type,
+        "Version": version or "unknown",
+        "Ring": str(query.get("Ring") or "unknown").strip().lower(),
+        "Language": str(
+            query.get("Language") or "unknown"
+        ).strip().lower(),
+        "Market": str(query.get("Market") or "unknown").strip().lower(),
+        "Source": source or "unknown",
+    }
+
+
+def _cache_key(dimensions, *, include_version):
+    selected = dict(dimensions)
+    if not include_version:
+        selected.pop("Version", None)
+    serialized = json.dumps(
+        selected,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _annotate_cache_metadata(metadata):
+    value = dict(metadata)
+    dimensions = _cache_dimensions(value)
+    value["CacheDimensions"] = dimensions
+    value["CacheKey"] = _cache_key(dimensions, include_version=True)
+    value["CompatibilityKey"] = _cache_key(
+        dimensions,
+        include_version=False,
+    )
+    return value
+
+
+def _cache_migrate(payload, target_version):
+    value = dict(payload)
+    artifacts = {
+        str(key): _annotate_cache_metadata(metadata)
+        for key, metadata in (value.get("Artifacts") or {}).items()
+        if isinstance(metadata, dict)
+    }
+    quarantine = {
+        str(key): _annotate_cache_metadata(metadata)
+        for key, metadata in (value.get("Quarantine") or {}).items()
+        if isinstance(metadata, dict)
+    }
+    history_items = []
+    for items in (value.get("History") or {}).values():
+        history_items.extend(
+            item for item in (items or [])
+            if isinstance(item, dict)
+        )
+    history_items.extend(artifacts.values())
+    history = {}
+    seen = set()
+    for item in history_items:
+        annotated = _annotate_cache_metadata(item)
+        key = annotated["CacheKey"]
+        if key in seen:
+            continue
+        seen.add(key)
+        history.setdefault(
+            annotated["CompatibilityKey"],
+            [],
+        ).append(annotated)
+    value.update({
+        "Version": target_version,
+        "SchemaVersion": target_version,
+        "Artifacts": artifacts,
+        "History": history,
+        "Quarantine": quarantine,
+    })
+    return value
+
+
+def _cache_migrate_v0(payload):
+    return _cache_migrate(payload, 1)
+
+
+def _cache_migrate_v1(payload):
+    return _cache_migrate(payload, 2)
+
+
+def _cache_migrate_v2(payload):
+    return _cache_migrate(payload, 3)
+
+
+PROFILE_STATE_SPEC = JsonStateSpec(
+    name="user profile",
+    current_version=1,
+    default_factory=lambda: {
+        "SearchHistory": [],
+        "PinnedFavorites": [],
+        "ThemeMode": "System",
+        "StoreRing": "Retail",
+        "StoreLanguage": "en-US",
+        "StoreMarket": "US",
+        "KeepUpdatedEnabled": False,
+        "KeepUpdatedLastScan": "",
+        "RepairRetentionCount": DEFAULT_REPAIR_RETENTION,
+    },
+    migrations={0: _profile_migrate_v0},
+    validator=lambda value: (
+        isinstance(value.get("SearchHistory"), list)
+        and isinstance(value.get("PinnedFavorites"), list)
+    ),
+)
+DOWNLOAD_STATE_SPEC = JsonStateSpec(
+    name="download queue",
+    current_version=2,
+    default_factory=lambda: {
+        "Version": 2,
+        "OutputPath": DEFAULT_OUTPUT,
+        "Queue": [],
+    },
+    migrations={
+        0: _download_migrate_v0,
+        1: _download_migrate_v1,
+    },
+    validator=lambda value: (
+        isinstance(value.get("OutputPath"), str)
+        and isinstance(value.get("Queue"), list)
+    ),
+)
+CACHE_STATE_SPEC = JsonStateSpec(
+    name="package cache manifest",
+    current_version=3,
+    default_factory=lambda: {
+        "Version": 3,
+        "Artifacts": {},
+        "History": {},
+        "Quarantine": {},
+    },
+    migrations={
+        0: _cache_migrate_v0,
+        1: _cache_migrate_v1,
+        2: _cache_migrate_v2,
+    },
+    validator=lambda value: all(
+        isinstance(value.get(key), dict)
+        for key in ("Artifacts", "History", "Quarantine")
+    ),
+)
+REPAIR_MANIFEST_STATE_SPEC = JsonStateSpec(
+    name="repair manifest",
+    current_version=1,
+    default_factory=lambda: {
+        "RepairName": "",
+        "Steps": [],
+        "Results": [],
+    },
+    migrations={
+        0: lambda payload: {
+            **payload,
+            "SchemaVersion": 1,
+        },
+    },
+    validator=lambda value: (
+        isinstance(value.get("RepairName"), str)
+        and isinstance(value.get("Steps", []), list)
+        and isinstance(value.get("Results", []), list)
+    ),
+)
+
 # ==================== BACKEND API ====================
 
 class StoreAPI:
@@ -725,40 +980,51 @@ class StoreAPI:
 
     @staticmethod
     def load_user_profile(path=USER_PROFILE_PATH):
-        try:
-            if not os.path.exists(path):
-                return StoreAPI.default_user_profile()
-            with open(path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-            profile = StoreAPI.default_user_profile()
-            profile["SearchHistory"] = [str(item) for item in data.get("SearchHistory", []) if str(item).strip()][:10]
-            profile["PinnedFavorites"] = [
-                StoreAPI.normalize_favorite_app(item)
-                for item in data.get("PinnedFavorites", [])
-                if isinstance(item, dict) and item.get("Name") and item.get("ProductId")
-            ][:20]
-            profile["ThemeMode"] = Theme.normalize_mode(data.get("ThemeMode", "System"))
-            profile["StoreRing"] = StoreAPI.normalize_store_ring(data.get("StoreRing", "Retail"))
-            profile["StoreLanguage"] = StoreAPI.normalize_store_language(data.get("StoreLanguage", "en-US"))
-            profile["StoreMarket"] = StoreAPI.normalize_store_market(data.get("StoreMarket", "US"))
-            profile["KeepUpdatedEnabled"] = bool(data.get("KeepUpdatedEnabled", False))
-            profile["KeepUpdatedLastScan"] = str(data.get("KeepUpdatedLastScan", "") or "")
-            profile["RepairRetentionCount"] = normalize_retention(
-                data.get(
-                    "RepairRetentionCount",
-                    DEFAULT_REPAIR_RETENTION,
-                )
+        data = load_json_state(path, PROFILE_STATE_SPEC).data
+        profile = StoreAPI.default_user_profile()
+        profile["SearchHistory"] = [
+            str(item)
+            for item in data.get("SearchHistory", [])
+            if str(item).strip()
+        ][:10]
+        profile["PinnedFavorites"] = [
+            StoreAPI.normalize_favorite_app(item)
+            for item in data.get("PinnedFavorites", [])
+            if (
+                isinstance(item, dict)
+                and item.get("Name")
+                and item.get("ProductId")
             )
-            return profile
-        except Exception:
-            return StoreAPI.default_user_profile()
+        ][:20]
+        profile["ThemeMode"] = Theme.normalize_mode(
+            data.get("ThemeMode", "System")
+        )
+        profile["StoreRing"] = StoreAPI.normalize_store_ring(
+            data.get("StoreRing", "Retail")
+        )
+        profile["StoreLanguage"] = StoreAPI.normalize_store_language(
+            data.get("StoreLanguage", "en-US")
+        )
+        profile["StoreMarket"] = StoreAPI.normalize_store_market(
+            data.get("StoreMarket", "US")
+        )
+        profile["KeepUpdatedEnabled"] = bool(
+            data.get("KeepUpdatedEnabled", False)
+        )
+        profile["KeepUpdatedLastScan"] = str(
+            data.get("KeepUpdatedLastScan", "") or ""
+        )
+        profile["RepairRetentionCount"] = normalize_retention(
+            data.get(
+                "RepairRetentionCount",
+                DEFAULT_REPAIR_RETENTION,
+            )
+        )
+        return profile
 
     @staticmethod
     def save_user_profile(profile, path=USER_PROFILE_PATH):
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        with open(path, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(profile, handle, indent=2)
-            handle.write("\n")
+        save_json_state(path, profile, PROFILE_STATE_SPEC)
         return path
 
     @staticmethod
@@ -1377,6 +1643,7 @@ if ($sig.SignerCertificate) {{
             reviewed_at=reviewed_at,
         )
         event = {
+            "SchemaVersion": 1,
             "Event": "package-trust-promotion",
             "RecordedAt": reviewed["Review"]["ReviewedAt"],
             "ArtifactSha256": artifact_sha256,
@@ -1387,12 +1654,7 @@ if ($sig.SignerCertificate) {{
             "Signature": reviewed.get("Signature", {}),
             "Review": reviewed.get("Review", {}),
         }
-        os.makedirs(os.path.dirname(os.path.abspath(journal_path)), exist_ok=True)
-        with open(journal_path, "a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(event, sort_keys=True))
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        append_jsonl(journal_path, event)
 
         promoted_package = package.copy()
         promoted_package["TrustState"] = reviewed["State"]
@@ -1454,7 +1716,7 @@ if ($sig.SignerCertificate) {{
                 metadata["StoreQuery"]["ProductId"] = str(
                     query["ProductId"]
                 ).strip()
-        return metadata
+        return _annotate_cache_metadata(metadata)
 
     @staticmethod
     def _manifest_path(folder):
@@ -1463,32 +1725,40 @@ if ($sig.SignerCertificate) {{
     @staticmethod
     def load_cache_manifest(folder):
         manifest_path = StoreAPI._manifest_path(folder)
-        try:
-            with open(manifest_path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-            if isinstance(data, dict) and isinstance(data.get("Artifacts"), dict):
-                data.setdefault("History", {})
-                data.setdefault("Quarantine", {})
-                return data
-        except Exception:
-            pass
-        return {
-            "Version": 2,
-            "Artifacts": {},
-            "History": {},
-            "Quarantine": {},
-        }
+        return load_json_state(manifest_path, CACHE_STATE_SPEC).data
 
     @staticmethod
     def save_cache_manifest(folder, manifest):
         os.makedirs(folder, exist_ok=True)
-        manifest.setdefault("Artifacts", {})
-        manifest.setdefault("History", {})
-        manifest.setdefault("Quarantine", {})
-        manifest["Version"] = 2
-        manifest["UpdatedAt"] = datetime.now(timezone.utc).isoformat()
-        with open(StoreAPI._manifest_path(folder), "w", encoding="utf-8") as handle:
-            json.dump(manifest, handle, indent=2, sort_keys=True)
+        value = dict(manifest)
+        value["Artifacts"] = {
+            str(key): _annotate_cache_metadata(metadata)
+            for key, metadata in (value.get("Artifacts") or {}).items()
+            if isinstance(metadata, dict)
+        }
+        value["Quarantine"] = {
+            str(key): _annotate_cache_metadata(metadata)
+            for key, metadata in (value.get("Quarantine") or {}).items()
+            if isinstance(metadata, dict)
+        }
+        history = {}
+        for items in (value.get("History") or {}).values():
+            for metadata in items or []:
+                if not isinstance(metadata, dict):
+                    continue
+                annotated = _annotate_cache_metadata(metadata)
+                history.setdefault(
+                    annotated["CompatibilityKey"],
+                    [],
+                ).append(annotated)
+        value["History"] = history
+        value["Version"] = CACHE_STATE_SPEC.current_version
+        value["UpdatedAt"] = datetime.now(timezone.utc).isoformat()
+        save_json_state(
+            StoreAPI._manifest_path(folder),
+            value,
+            CACHE_STATE_SPEC,
+        )
 
     @staticmethod
     def _metadata_version_key(metadata):
@@ -1530,14 +1800,17 @@ if ($sig.SignerCertificate) {{
 
     @staticmethod
     def _record_cache_history(manifest, metadata, history_limit=CACHE_HISTORY_LIMIT):
-        identity = str(metadata.get("PackageIdentity") or package_identity(metadata.get("FileName", ""))).lower()
-        if not identity:
-            return []
+        metadata = _annotate_cache_metadata(metadata)
+        compatibility_key = metadata["CompatibilityKey"]
 
         history = manifest.setdefault("History", {})
         entries = [
-            item for item in history.get(identity, [])
-            if item.get("FileName") != metadata.get("FileName")
+            _annotate_cache_metadata(item)
+            for item in history.get(compatibility_key, [])
+            if (
+                isinstance(item, dict)
+                and item.get("CacheKey") != metadata.get("CacheKey")
+            )
         ]
         entries.append(metadata.copy())
         entries.sort(
@@ -1546,7 +1819,7 @@ if ($sig.SignerCertificate) {{
         )
         kept = entries[:history_limit]
         pruned = entries[history_limit:]
-        history[identity] = kept
+        history[compatibility_key] = kept
 
         for item in pruned:
             manifest["Artifacts"].pop(item.get("FileName", ""), None)
@@ -1566,35 +1839,53 @@ if ($sig.SignerCertificate) {{
             root=folder,
             require_file=True,
         )
-        metadata = StoreAPI.artifact_metadata(package, artifact_path, source_url)
+        metadata = StoreAPI.artifact_metadata(
+            package,
+            artifact_path,
+            source_url,
+        )
         metadata["CachedAt"] = datetime.now(timezone.utc).isoformat()
-        manifest = StoreAPI.load_cache_manifest(folder)
         filename = metadata["FileName"]
         trusted = trust_report_allows_automation(
             metadata.get("TrustReport"),
             metadata["Sha256"],
         )
         pruned = []
-        if trusted:
-            manifest["Quarantine"].pop(filename, None)
-            manifest["Artifacts"][filename] = metadata
-            pruned = StoreAPI._record_cache_history(manifest, metadata)
-        else:
-            manifest["Artifacts"].pop(filename, None)
-            manifest["Quarantine"][filename] = metadata
-            identity = str(
-                metadata.get("PackageIdentity")
-                or package_identity(filename)
-            ).lower()
-            if identity in manifest["History"]:
-                manifest["History"][identity] = [
-                    item
-                    for item in manifest["History"][identity]
-                    if item.get("FileName") != filename
-                ]
-                if not manifest["History"][identity]:
-                    manifest["History"].pop(identity, None)
-        StoreAPI.save_cache_manifest(folder, manifest)
+
+        def update_manifest(manifest):
+            manifest.setdefault("Artifacts", {})
+            manifest.setdefault("History", {})
+            manifest.setdefault("Quarantine", {})
+            manifest["Version"] = CACHE_STATE_SPEC.current_version
+            manifest["UpdatedAt"] = datetime.now(timezone.utc).isoformat()
+            if trusted:
+                manifest["Quarantine"].pop(filename, None)
+                manifest["Artifacts"][filename] = metadata
+                pruned.extend(
+                    StoreAPI._record_cache_history(manifest, metadata)
+                )
+            else:
+                manifest["Artifacts"].pop(filename, None)
+                manifest["Quarantine"][filename] = metadata
+                compatibility_key = metadata["CompatibilityKey"]
+                if compatibility_key in manifest["History"]:
+                    manifest["History"][compatibility_key] = [
+                        item
+                        for item in manifest["History"][compatibility_key]
+                        if item.get("CacheKey") != metadata["CacheKey"]
+                    ]
+                    if not manifest["History"][compatibility_key]:
+                        manifest["History"].pop(
+                            compatibility_key,
+                            None,
+                        )
+            return manifest
+
+        update_json_state(
+            StoreAPI._manifest_path(folder),
+            CACHE_STATE_SPEC,
+            update_manifest,
+        )
         StoreAPI._remove_cache_artifacts(folder, pruned)
         package["LocalPath"] = artifact_path
         package["SizeBytes"] = metadata["SizeBytes"]
@@ -1661,25 +1952,18 @@ if ($sig.SignerCertificate) {{
 
     @staticmethod
     def write_download_state(queue, output_path, path=DOWNLOAD_STATE_PATH):
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         state = {
-            "Version": 1,
+            "Version": DOWNLOAD_STATE_SPEC.current_version,
             "UpdatedAt": datetime.now(timezone.utc).isoformat(),
             "OutputPath": os.path.abspath(output_path),
             "Queue": StoreAPI.download_state_queue_metadata(queue),
         }
-        with open(path, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(state, handle, indent=2, sort_keys=True)
-            handle.write("\n")
+        save_json_state(path, state, DOWNLOAD_STATE_SPEC)
         return path
 
     @staticmethod
     def load_download_state(path=DOWNLOAD_STATE_PATH):
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-        except Exception:
-            return {"Version": 1, "OutputPath": DEFAULT_OUTPUT, "Queue": []}
+        data = load_json_state(path, DOWNLOAD_STATE_SPEC).data
 
         queue = []
         for item in data.get("Queue", []):
@@ -1689,7 +1973,7 @@ if ($sig.SignerCertificate) {{
                 continue
             queue.append(annotate_package(item.copy()))
         return {
-            "Version": 1,
+            "Version": DOWNLOAD_STATE_SPEC.current_version,
             "OutputPath": data.get("OutputPath") or DEFAULT_OUTPUT,
             "Queue": queue,
             "UpdatedAt": data.get("UpdatedAt"),
@@ -1697,11 +1981,7 @@ if ($sig.SignerCertificate) {{
 
     @staticmethod
     def clear_download_state(path=DOWNLOAD_STATE_PATH):
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-        except OSError:
-            pass
+        remove_state_file(path)
 
     @staticmethod
     def collect_recent_repair_manifests(limit=5):
@@ -1714,10 +1994,12 @@ if ($sig.SignerCertificate) {{
                 continue
             manifest_path = os.path.join(root, "repair-manifest.json")
             try:
-                with open(manifest_path, "r", encoding="utf-8") as handle:
-                    data = json.load(handle)
+                data = load_json_state(
+                    manifest_path,
+                    REPAIR_MANIFEST_STATE_SPEC,
+                ).data
                 manifests.append((os.path.getmtime(manifest_path), data))
-            except Exception:
+            except (OSError, ValueError):
                 continue
 
         recent = []
@@ -2064,8 +2346,11 @@ if ($sig.SignerCertificate) {{
                 "Sha256": StoreAPI.file_sha256(destination),
             }
             if StoreAPI.cached_artifact_is_valid(destination, destination_metadata) and destination_metadata["Sha256"] == source_metadata["Sha256"]:
-                manifest["Artifacts"][filename] = {**source_metadata, "Path": os.path.abspath(destination)}
-                StoreAPI.save_cache_manifest(cache_path, manifest)
+                StoreAPI.write_artifact_manifest(
+                    package,
+                    destination,
+                    cache_path,
+                )
                 return True, f"Already cached: {destination}"
 
         shutil.copy2(local_path, destination)
@@ -2209,7 +2494,7 @@ if ($sig.SignerCertificate) {{
             token_expires_at=token_expires_at,
         )
         path = os.path.join(cache_folder, index_name)
-        atomic_write_json(path, index)
+        atomic_state_write_json(path, index)
         return index
 
     @staticmethod
@@ -2373,19 +2658,23 @@ if ($sig.SignerCertificate) {{
             history = manifest.get("History") or {}
             if not history:
                 for metadata in manifest.get("Artifacts", {}).values():
-                    identity = str(metadata.get("PackageIdentity") or package_identity(metadata.get("FileName", ""))).lower()
-                    if identity:
-                        history.setdefault(identity, []).append(metadata)
+                    annotated = _annotate_cache_metadata(metadata)
+                    history.setdefault(
+                        annotated["CompatibilityKey"],
+                        [],
+                    ).append(annotated)
 
-            for identity, items in history.items():
-                identity = str(identity).strip().lower()
-                if wanted and identity not in wanted:
-                    continue
+            for _compatibility_key, items in history.items():
                 for item in items or []:
                     if not isinstance(item, dict) or not item.get("FileName"):
                         continue
                     try:
-                        metadata = validate_package_record(item, require_url=False)
+                        metadata = _annotate_cache_metadata(
+                            validate_package_record(
+                                item,
+                                require_url=False,
+                            )
+                        )
                         expected_path = confined_package_path(folder, metadata["FileName"])
                         metadata_path = metadata.get("Path") or expected_path
                         metadata_path = validate_existing_package_path(
@@ -2398,10 +2687,19 @@ if ($sig.SignerCertificate) {{
                             continue
                     except PackageIngressError:
                         continue
-                    metadata["PackageIdentity"] = str(metadata.get("PackageIdentity") or identity)
+                    identity = str(
+                        metadata.get("PackageIdentity")
+                        or package_identity(metadata["FileName"])
+                    ).strip().lower()
+                    if not identity or (wanted and identity not in wanted):
+                        continue
+                    metadata["PackageIdentity"] = identity
                     metadata["Path"] = metadata_path
                     metadata["CacheFolder"] = folder
-                    key = (metadata["PackageIdentity"].lower(), metadata["FileName"].lower(), os.path.abspath(metadata["Path"]).lower())
+                    key = (
+                        metadata["CacheKey"],
+                        os.path.abspath(metadata["Path"]).lower(),
+                    )
                     trust_ok, _trust_message, _report = (
                         StoreAPI.package_trust_status(
                             metadata,
@@ -2423,7 +2721,47 @@ if ($sig.SignerCertificate) {{
         return entries
 
     @staticmethod
-    def rollback_candidates(cache_folders, package_identities=None, current_versions=None):
+    def _cache_entry_matches(
+        entry,
+        *,
+        target_arch=None,
+        package_type=None,
+        store_query=None,
+    ):
+        dimensions = _cache_dimensions(entry)
+        if target_arch:
+            requested_arch = str(target_arch).strip().lower()
+            if dimensions["Architecture"] not in {
+                requested_arch,
+                "neutral",
+            }:
+                return False
+        if (
+            package_type
+            and dimensions["PackageType"]
+            != str(package_type).strip().upper()
+        ):
+            return False
+        expected_query = {
+            key: str(value).strip().lower()
+            for key, value in (store_query or {}).items()
+            if key in {"Ring", "Language", "Market"} and str(value).strip()
+        }
+        for key, expected in expected_query.items():
+            if dimensions[key] != expected:
+                return False
+        return True
+
+    @staticmethod
+    def rollback_candidates(
+        cache_folders,
+        package_identities=None,
+        current_versions=None,
+        *,
+        target_arch=None,
+        package_type=None,
+        store_query=None,
+    ):
         versions = {
             str(identity).strip().lower(): str(version).strip()
             for identity, version in (current_versions or {}).items()
@@ -2431,15 +2769,24 @@ if ($sig.SignerCertificate) {{
         }
         grouped = {}
         for entry in StoreAPI.cache_history_entries(cache_folders, package_identities):
-            identity = str(entry.get("PackageIdentity", "")).lower()
-            grouped.setdefault(identity, []).append(entry)
+            if not StoreAPI._cache_entry_matches(
+                entry,
+                target_arch=target_arch,
+                package_type=package_type,
+                store_query=store_query,
+            ):
+                continue
+            grouped.setdefault(entry["CompatibilityKey"], []).append(entry)
 
         candidates = []
-        for identity, entries in grouped.items():
+        for compatibility_key, entries in grouped.items():
             entries.sort(
                 key=lambda item: (StoreAPI._metadata_version_key(item), item.get("CachedAt", "")),
                 reverse=True,
             )
+            identity = str(
+                entries[0].get("PackageIdentity", "")
+            ).lower()
             current_version = versions.get(identity)
             selected = None
 
@@ -2457,6 +2804,7 @@ if ($sig.SignerCertificate) {{
 
             candidate = selected.copy()
             candidate["RollbackIdentity"] = identity
+            candidate["RollbackCompatibilityKey"] = compatibility_key
             candidate["RollbackVersion"] = (
                 candidate.get("AvailableVersion")
                 or format_version_tuple(package_version_tuple(candidate["FileName"]))
@@ -2774,14 +3122,27 @@ if ($sig.SignerCertificate) {{
         }
 
     @staticmethod
-    def package_diff_candidates(cache_folders, package_identities=None):
+    def package_diff_candidates(
+        cache_folders,
+        package_identities=None,
+        *,
+        target_arch=None,
+        package_type=None,
+        store_query=None,
+    ):
         grouped = {}
         for entry in StoreAPI.cache_history_entries(cache_folders, package_identities):
-            identity = str(entry.get("PackageIdentity", "")).lower()
-            grouped.setdefault(identity, []).append(entry)
+            if not StoreAPI._cache_entry_matches(
+                entry,
+                target_arch=target_arch,
+                package_type=package_type,
+                store_query=store_query,
+            ):
+                continue
+            grouped.setdefault(entry["CompatibilityKey"], []).append(entry)
 
         candidates = []
-        for identity, entries in grouped.items():
+        for compatibility_key, entries in grouped.items():
             entries.sort(
                 key=lambda item: (StoreAPI._metadata_version_key(item), item.get("CachedAt", "")),
                 reverse=True,
@@ -2790,7 +3151,10 @@ if ($sig.SignerCertificate) {{
                 continue
             newest, previous = entries[0], entries[1]
             candidates.append({
-                "PackageIdentity": identity,
+                "PackageIdentity": str(
+                    newest.get("PackageIdentity", "")
+                ).lower(),
+                "CompatibilityKey": compatibility_key,
                 "Old": previous,
                 "New": newest,
             })
@@ -3584,6 +3948,7 @@ if ($sig.SignerCertificate) {{
     def write_repair_manifest(context):
         os.makedirs(context["BackupRoot"], exist_ok=True)
         payload = {
+            "SchemaVersion": 1,
             "RepairName": context.get("RepairName"),
             "StartedAt": context.get("StartedAt"),
             "CompletedAt": context.get("CompletedAt"),
@@ -3593,8 +3958,11 @@ if ($sig.SignerCertificate) {{
             "Steps": context.get("Steps", []),
             "Results": context.get("Results", []),
         }
-        with open(context["ManifestPath"], "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
+        save_json_state(
+            context["ManifestPath"],
+            payload,
+            REPAIR_MANIFEST_STATE_SPEC,
+        )
 
     @staticmethod
     def write_repair_restore_script(context):
@@ -4039,6 +4407,7 @@ class MSStoreHelperApp(ctk.CTk):
         if self.download_queue:
             self._update_queue_ui()
         self._show_welcome()
+        self.after(100, self._show_state_recovery_notices)
         if self.download_queue:
             self._log("INFO", f"Restored {len(self.download_queue)} queued download(s) from previous session")
         if os.environ.get("MSSTOREHELPER_SKIP_SOURCE_HEALTH") != "1":
@@ -5415,6 +5784,111 @@ Fixes "needs to be online" and similar errors.
         except (RuntimeError, TclError):
             return False
 
+    def _show_state_recovery_notices(self):
+        notices = pop_recovery_notices()
+        if not notices:
+            return
+        for notice in notices:
+            self._log(
+                "WARNING",
+                (
+                    f"{notice.state_name} was quarantined after a "
+                    f"validation failure: {notice.quarantine_path}"
+                ),
+            )
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("State Recovery")
+        dialog.geometry("620x390")
+        dialog.minsize(520, 330)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        content = ctk.CTkFrame(
+            dialog,
+            fg_color="transparent",
+        )
+        content.pack(fill="both", expand=True, padx=24, pady=24)
+        ctk.CTkLabel(
+            content,
+            text="State recovery required",
+            font=("Segoe UI Semibold", 20),
+            anchor="w",
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            content,
+            text=(
+                "Invalid state was preserved in quarantine. "
+                "MSStoreHelper loaded safe defaults instead of "
+                "overwriting the evidence."
+            ),
+            font=("Segoe UI", 12),
+            text_color=Theme.TEXT_SECONDARY,
+            anchor="w",
+            justify="left",
+            wraplength=560,
+        ).pack(fill="x", pady=(6, 14))
+
+        details = ctk.CTkTextbox(
+            content,
+            height=180,
+            font=("Consolas", 10),
+            fg_color=Theme.BG_DARK,
+            text_color=Theme.TEXT_SECONDARY,
+            wrap="word",
+        )
+        details.pack(fill="both", expand=True)
+        details.insert(
+            "1.0",
+            "\n\n".join(
+                (
+                    f"{notice.state_name}\n"
+                    f"Reason: {notice.reason}\n"
+                    f"Quarantine: {notice.quarantine_path}"
+                )
+                for notice in notices
+            ),
+        )
+        details.configure(state="disabled")
+
+        buttons = ctk.CTkFrame(content, fg_color="transparent")
+        buttons.pack(fill="x", pady=(14, 0))
+
+        def open_quarantine_folder():
+            folder = os.path.dirname(notices[0].quarantine_path)
+            try:
+                os.startfile(folder)
+            except OSError as exc:
+                self._log(
+                    "ERROR",
+                    f"Could not open quarantine folder: {exc}",
+                )
+
+        ctk.CTkButton(
+            buttons,
+            text="Open Quarantine Folder",
+            width=180,
+            height=34,
+            fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=open_quarantine_folder,
+        ).pack(side="left")
+        continue_button = ctk.CTkButton(
+            buttons,
+            text="Continue with Safe Defaults",
+            width=200,
+            height=34,
+            fg_color=Theme.PRIMARY,
+            hover_color=Theme.PRIMARY_HOVER,
+            command=dialog.destroy,
+        )
+        continue_button.pack(side="right")
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        continue_button.focus_set()
+
     def _operation_changed_from_worker(self, snapshot):
         self._post_ui(
             lambda value=copy.deepcopy(snapshot): (
@@ -5486,6 +5960,7 @@ Fixes "needs to be online" and similar errors.
             self._update_status(f"{kind.title()} cancelled — {details}", Theme.WARNING)
         else:
             self._update_status(f"{kind.title()} failed — {details}", Theme.DANGER)
+        self._show_state_recovery_notices()
 
     def _cancel_active_operation(self):
         if not self.operation_coordinator.cancel():
@@ -6796,21 +7271,45 @@ Fixes "needs to be online" and similar errors.
             return
 
         cache_folders = self._rollback_cache_folders()
+        target_arch = self._target_arch()
+        store_query = self._store_query_settings()
         try:
             self.operation_coordinator.start(
                 "package-diff",
-                lambda context, ids=tuple(identities), folders=tuple(cache_folders): (
-                    self._package_diff_worker(context, ids, folders)
+                lambda context, ids=tuple(identities), folders=tuple(cache_folders), arch=target_arch, query=store_query: (
+                    self._package_diff_worker(
+                        context,
+                        ids,
+                        folders,
+                        arch,
+                        query,
+                    )
                 ),
-                input_summary={"IdentityCount": len(identities)},
+                input_summary={
+                    "IdentityCount": len(identities),
+                    "TargetArchitecture": target_arch,
+                    "StoreQuery": store_query,
+                },
             )
         except OperationConflictError as exc:
             self._update_status("Another operation is already active", Theme.WARNING)
             self._log("WARNING", str(exc))
 
-    def _package_diff_worker(self, context, identities, cache_folders):
+    def _package_diff_worker(
+        self,
+        context,
+        identities,
+        cache_folders,
+        target_arch,
+        store_query,
+    ):
         identity_set = {identity.lower() for identity in identities if identity}
-        candidates = StoreAPI.package_diff_candidates(cache_folders, identity_set)
+        candidates = StoreAPI.package_diff_candidates(
+            cache_folders,
+            identity_set,
+            target_arch=target_arch,
+            store_query=store_query,
+        )
         if not candidates:
             message = "Package diff needs two valid cached versions for a queued app identity"
             context.failed("package-diff", message)
@@ -6888,6 +7387,8 @@ Fixes "needs to be online" and similar errors.
             return
 
         cache_folders = tuple(self._rollback_cache_folders())
+        target_arch = self._target_arch()
+        store_query = self._store_query_settings()
         packages = tuple(
             self._package_snapshot(package)
             for package in self.download_queue
@@ -6895,16 +7396,35 @@ Fixes "needs to be online" and similar errors.
         try:
             self.operation_coordinator.start(
                 "rollback",
-                lambda context, ids=tuple(identities), folders=cache_folders, queue=packages: (
-                    self._rollback_worker(context, ids, folders, queue)
+                lambda context, ids=tuple(identities), folders=cache_folders, queue=packages, arch=target_arch, query=store_query: (
+                    self._rollback_worker(
+                        context,
+                        ids,
+                        folders,
+                        queue,
+                        arch,
+                        query,
+                    )
                 ),
-                input_summary={"IdentityCount": len(identities)},
+                input_summary={
+                    "IdentityCount": len(identities),
+                    "TargetArchitecture": target_arch,
+                    "StoreQuery": store_query,
+                },
             )
         except OperationConflictError as exc:
             self._update_status("Another operation is already active", Theme.WARNING)
             self._log("WARNING", str(exc))
 
-    def _rollback_worker(self, context, identities, cache_folders, packages):
+    def _rollback_worker(
+        self,
+        context,
+        identities,
+        cache_folders,
+        packages,
+        target_arch,
+        store_query,
+    ):
         identity_set = {identity.lower() for identity in identities if identity}
         context.progress(0.05, "Inspecting installed and cached package versions")
         installed_versions = StoreAPI.get_installed_appx_versions()
@@ -6925,6 +7445,8 @@ Fixes "needs to be online" and similar errors.
             cache_folders,
             identity_set,
             current_versions,
+            target_arch=target_arch,
+            store_query=store_query,
         )
         if not candidates:
             message = "No valid cached previous version was found for queued app identities"

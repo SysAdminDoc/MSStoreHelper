@@ -36,6 +36,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - **Keep Updated Mode** - Re-checks installed catalog apps and queues newer Store bundles while the app is open
 - **Rollback Cache** - Keeps the last two cached package versions and can reinstall the previous cached app version
 - **Package Diff** - Compares cached package versions for manifest capability and dependency changes
+- **Crash-Safe State** - Versions and atomically replaces local profile, queue, cache, repair, resume, mirror, and operation state; invalid generations are quarantined for recovery instead of overwritten
 - **Source Health** - Detects StoreEdgeFD, RG-Adguard, WinGet, and Store CLI availability with fallback hints
 - **Store Query Controls** - Persists RG-Adguard ring, Store language, and market for localized package lookup and deployment artifacts
 - **Verified Python Setup** - Uses exact transitive pins, SHA-256 artifact locks, and tested offline wheelhouses
@@ -262,6 +263,7 @@ MSStoreHelper/
 ├── package_ingress.py             # Package filename, URL, and path boundary
 ├── package_trust.py               # Signature, manifest, identity, and promotion policy
 ├── repair_transaction.py          # Fail-closed repair, backup, and restore engine
+├── state_repository.py            # Versioned atomic state, locking, migration, and recovery
 ├── pyproject.toml                 # Python package metadata
 ├── requirements.in                # Canonical fully pinned dependency graph
 ├── requirements.txt               # Aggregate artifact-hashed Windows lock
@@ -289,6 +291,7 @@ MSStoreHelper/
 │   ├── test_keep_updated.py       # Installed catalog update tests
 │   ├── test_package_diff.py       # Cached manifest diff tests
 │   ├── test_user_profile.py       # Search history and favorites tests
+│   ├── test_state_repository.py   # Crash, migration, quarantine, and concurrency tests
 │   ├── test_dependency_bootstrap.py # Dependency setup tests
 │   ├── test_release_notes.py      # Store page release-note tests
 │   └── test_store_sources.py      # Source health and fallback tests

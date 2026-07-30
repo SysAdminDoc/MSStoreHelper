@@ -26,6 +26,9 @@ All notable changes to MSStoreHelper will be documented in this file.
 - Bound resumed downloads to a verified source identity and strong ETag or Last-Modified validator, with exact `If-Range`/`Content-Range`, safe HTTP 200 fallback, and HTTP 416 recovery semantics.
 - Added fail-closed package byte and disk-reserve limits to redirected HEAD/GET requests, hash-bound redacted partial sidecars, and cancellation rules that discard non-resumable fragments.
 - Added automatic refresh of expired package URLs from persisted product/ring/language/market metadata before one bounded retry.
+- Added one versioned state repository for profiles, download queues, cache manifests, repair manifests, operation history, resume metadata, trust reviews, and mirror state, with same-directory atomic replacement and inter-process serialization.
+- Corrupt or future-schema state is now quarantined instead of silently discarded, and the desktop app offers to open the preserved evidence before continuing with safe defaults.
+- Cache history now uses identity, architecture, package type, version, ring, language, market, and source fingerprints so rollback and package diff cannot pair incompatible artifacts.
 
 ## [v3.36.0] - 2026-07-29
 
