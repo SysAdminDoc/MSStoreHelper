@@ -150,7 +150,8 @@ class CliWorkflowTests(unittest.TestCase):
         package = index["Packages"][0]
         self.assertEqual(package["FileName"], filename)
         self.assertEqual(package["PackageIdentity"], "Microsoft.WindowsTerminal")
-        self.assertEqual(package["Url"], f"http://127.0.0.1:8765/{filename}")
+        self.assertEqual(package["Url"], f"http://127.0.0.1:8765/packages/{filename}")
+        self.assertNotIn("CacheFolder", index)
         self.assertTrue(package["Sha256"])
 
     def test_mirror_server_serves_index_and_package_without_gui(self):
@@ -170,7 +171,7 @@ class CliWorkflowTests(unittest.TestCase):
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/msstorehelper-mirror-index.json", timeout=5) as response:
                     payload = json.loads(response.read().decode("utf-8"))
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/{filename}", timeout=5) as response:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/packages/{filename}", timeout=5) as response:
                     package_bytes = response.read()
             finally:
                 server.shutdown()
@@ -179,7 +180,7 @@ class CliWorkflowTests(unittest.TestCase):
 
         self.assertEqual(index["PackageCount"], 1)
         self.assertEqual(payload["PackageCount"], 1)
-        self.assertEqual(payload["Packages"][0]["Url"], f"http://127.0.0.1:{port}/{filename}")
+        self.assertEqual(payload["Packages"][0]["Url"], f"http://127.0.0.1:{port}/packages/{filename}")
         self.assertEqual(package_bytes, b"package")
 
     def test_run_cli_mirror_index_only_writes_index_without_gui(self):

@@ -13,6 +13,9 @@ All notable changes to MSStoreHelper will be documented in this file.
 - Replaced best-effort repair recipes with inspected, explicitly confirmed transactions that lock by UUID, verify restrictive backup ACLs and disk space, and stop on failed preconditions, backups, mutations, or postconditions.
 - Added configurable backup retention, safe-checkpoint cancellation, per-item evidence manifests, and an in-app restore picker that hash-verifies filesystem and registry backups, restores service state, verifies package identities, and never consumes the source backup.
 - Added real Windows sandbox coverage for repair, fail-fast behavior, cancellation, tamper rejection, and repeatable restore.
+- Replaced generic directory mirroring with an allowlisted service that exposes only a sanitized index and hash-current, trust-approved `/packages/...` routes; directory listings, cache metadata, local paths, query-bearing requests, symlinks, and unindexed files are unreachable.
+- Added atomic concurrent index writes, verified HEAD/single-Range responses, post-start artifact integrity checks, bounded redacted JSONL access audits, and separate bind/advertised addresses.
+- Kept mirror binding loopback-only by default; non-loopback use now requires explicit LAN mode, short-lived header-only bearer authentication, and either TLS or a cleartext-risk acknowledgement.
 
 ## [v3.36.0] - 2026-07-29
 

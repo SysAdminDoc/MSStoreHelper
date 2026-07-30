@@ -17,12 +17,14 @@ import json
 import re
 import hashlib
 import shutil
+import ssl
 import tempfile
+import time
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import quote
+from http.server import ThreadingHTTPServer
+from urllib.parse import quote, urlsplit
 try:
     import winreg
 except ImportError:
@@ -77,6 +79,19 @@ from repair_transaction import (
     normalize_retention,
     render_repair_plan,
     render_restore_plan,
+)
+from mirror_service import (
+    MIRROR_AUDIT_FILENAME,
+    MirrorAuditLog,
+    MirrorConfigurationError,
+    atomic_write_json,
+    create_bearer_token,
+    make_mirror_handler,
+    mirror_base_url,
+    normalize_token_ttl,
+    utc_timestamp as mirror_utc_timestamp,
+    validate_network_policy,
+    wrap_server_tls,
 )
 from store_sources import (
     StoreSourceError,
@@ -1873,7 +1888,13 @@ if ($sig.SignerCertificate) {{
         return True, f"Cached: {destination}"
 
     @staticmethod
-    def mirror_package_records(cache_folder, host="127.0.0.1", port=8765):
+    def mirror_package_records(
+        cache_folder,
+        advertised_host="127.0.0.1",
+        port=8765,
+        *,
+        tls_enabled=False,
+    ):
         folder = os.path.abspath(cache_folder)
         if not os.path.isdir(folder):
             return []
@@ -1882,7 +1903,11 @@ if ($sig.SignerCertificate) {{
         artifacts = manifest.get("Artifacts", {})
         records = []
         seen = set()
-        base_url = f"http://{host}:{int(port)}"
+        base_url = mirror_base_url(
+            advertised_host,
+            port,
+            tls_enabled=tls_enabled,
+        )
 
         for filename in sorted(os.listdir(folder), key=str.lower):
             try:
@@ -1915,7 +1940,7 @@ if ($sig.SignerCertificate) {{
             seen.add(key)
             records.append({
                 "FileName": filename,
-                "Url": f"{base_url}/{quote(filename)}",
+                "Url": f"{base_url}/packages/{quote(filename, safe='')}",
                 "SizeBytes": os.path.getsize(path),
                 "SizeStr": metadata.get("SizeStr") or format_size(os.path.getsize(path)),
                 "Sha256": metadata.get("Sha256") or StoreAPI.file_sha256(path),
@@ -1929,73 +1954,217 @@ if ($sig.SignerCertificate) {{
         return records
 
     @staticmethod
-    def build_mirror_index(cache_folder, host="127.0.0.1", port=8765):
-        folder = os.path.abspath(cache_folder)
-        records = StoreAPI.mirror_package_records(folder, host, port)
+    def build_mirror_index(
+        cache_folder,
+        advertised_host="127.0.0.1",
+        port=8765,
+        *,
+        tls_enabled=False,
+        requires_authorization=False,
+        token_expires_at=None,
+    ):
+        records = StoreAPI.mirror_package_records(
+            cache_folder,
+            advertised_host,
+            port,
+            tls_enabled=tls_enabled,
+        )
+        base_url = mirror_base_url(
+            advertised_host,
+            port,
+            tls_enabled=tls_enabled,
+        )
         return {
+            "SchemaVersion": 2,
             "AppName": APP_NAME,
             "AppVersion": APP_VERSION,
             "GeneratedAt": datetime.now(timezone.utc).isoformat(),
-            "CacheFolder": folder,
-            "BaseUrl": f"http://{host}:{int(port)}",
+            "BaseUrl": base_url,
+            "IndexUrl": f"{base_url}/{MIRROR_INDEX_NAME}",
             "IndexFile": MIRROR_INDEX_NAME,
+            "Authorization": {
+                "Required": bool(requires_authorization),
+                "Scheme": (
+                    "Bearer" if requires_authorization else "None"
+                ),
+                "ExpiresAt": (
+                    str(token_expires_at)
+                    if requires_authorization
+                    else ""
+                ),
+            },
             "PackageCount": len(records),
             "Packages": records,
         }
 
     @staticmethod
-    def write_mirror_index(cache_folder, host="127.0.0.1", port=8765, index_name=MIRROR_INDEX_NAME):
+    def write_mirror_index(
+        cache_folder,
+        advertised_host="127.0.0.1",
+        port=8765,
+        *,
+        tls_enabled=False,
+        requires_authorization=False,
+        token_expires_at=None,
+        index_name=MIRROR_INDEX_NAME,
+    ):
+        if index_name != MIRROR_INDEX_NAME:
+            raise MirrorConfigurationError(
+                "Mirror index filename is fixed by the route allowlist"
+            )
         os.makedirs(cache_folder, exist_ok=True)
-        index = StoreAPI.build_mirror_index(cache_folder, host, port)
+        index = StoreAPI.build_mirror_index(
+            cache_folder,
+            advertised_host,
+            port,
+            tls_enabled=tls_enabled,
+            requires_authorization=requires_authorization,
+            token_expires_at=token_expires_at,
+        )
         path = os.path.join(cache_folder, index_name)
-        with open(path, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(index, handle, indent=2)
-            handle.write("\n")
-        index["IndexPath"] = os.path.abspath(path)
+        atomic_write_json(path, index)
         return index
 
     @staticmethod
-    def mirror_http_handler(cache_folder, host="127.0.0.1", port=8765):
+    def _mirror_package_routes(cache_folder, index):
         folder = os.path.abspath(cache_folder)
-
-        class MirrorHandler(SimpleHTTPRequestHandler):
-            server_version = f"{APP_NAME}Mirror/{APP_VERSION}"
-
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, directory=folder, **kwargs)
-
-            def do_GET(self):
-                if self.path in {"/", f"/{MIRROR_INDEX_NAME}"}:
-                    actual_port = int(self.server.server_address[1])
-                    StoreAPI.write_mirror_index(folder, host, actual_port)
-                    self.path = f"/{MIRROR_INDEX_NAME}"
-                return super().do_GET()
-
-            def do_HEAD(self):
-                if self.path in {"/", f"/{MIRROR_INDEX_NAME}"}:
-                    actual_port = int(self.server.server_address[1])
-                    StoreAPI.write_mirror_index(folder, host, actual_port)
-                    self.path = f"/{MIRROR_INDEX_NAME}"
-                return super().do_HEAD()
-
-            def end_headers(self):
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("X-MSStoreHelper-Mirror", APP_VERSION)
-                super().end_headers()
-
-            def log_message(self, _format, *_args):
-                return
-
-        return MirrorHandler
+        routes = {}
+        for package in index.get("Packages", []):
+            filename = validate_package_filename(package["FileName"])
+            path = confined_package_path(folder, filename)
+            path = validate_existing_package_path(
+                path,
+                expected_filename=filename,
+                root=folder,
+                require_file=True,
+            )
+            route = urlsplit(package["Url"]).path
+            routes[route] = {
+                "Path": path,
+                "SizeBytes": int(package["SizeBytes"]),
+                "Sha256": str(package["Sha256"]),
+            }
+        return routes
 
     @staticmethod
-    def create_mirror_server(cache_folder, host="127.0.0.1", port=8765):
+    def mirror_http_handler(
+        cache_folder,
+        advertised_host="127.0.0.1",
+        port=8765,
+        *,
+        bearer_token=None,
+        token_expires_at=None,
+        tls_enabled=False,
+        audit_log_path=None,
+    ):
         folder = os.path.abspath(cache_folder)
         os.makedirs(folder, exist_ok=True)
-        handler = StoreAPI.mirror_http_handler(folder, host, port)
-        server = ThreadingHTTPServer((host, int(port)), handler)
+        index = StoreAPI.build_mirror_index(
+            folder,
+            advertised_host,
+            port,
+            tls_enabled=tls_enabled,
+            requires_authorization=bool(bearer_token),
+            token_expires_at=token_expires_at,
+        )
+        routes = StoreAPI._mirror_package_routes(folder, index)
+        audit = MirrorAuditLog(
+            audit_log_path
+            or os.path.join(folder, MIRROR_AUDIT_FILENAME)
+        )
+        return make_mirror_handler(
+            index_name=MIRROR_INDEX_NAME,
+            index_payload=index,
+            package_routes=routes,
+            app_version=APP_VERSION,
+            audit_log=audit,
+            bearer_token=bearer_token,
+            token_expires_at=token_expires_at,
+        )
+
+    @staticmethod
+    def create_mirror_server(
+        cache_folder,
+        bind_host="127.0.0.1",
+        port=8765,
+        *,
+        advertised_host=None,
+        lan_mode=False,
+        acknowledge_cleartext=False,
+        tls_cert=None,
+        tls_key=None,
+        token_ttl_seconds=900,
+        bearer_token=None,
+        audit_log_path=None,
+    ):
+        policy = validate_network_policy(
+            bind_host,
+            advertised_host=advertised_host,
+            lan_mode=lan_mode,
+            acknowledge_cleartext=acknowledge_cleartext,
+            tls_cert=tls_cert,
+            tls_key=tls_key,
+        )
+        folder = os.path.abspath(cache_folder)
+        os.makedirs(folder, exist_ok=True)
+        audit = MirrorAuditLog(
+            audit_log_path
+            or os.path.join(folder, MIRROR_AUDIT_FILENAME)
+        )
+        placeholder = make_mirror_handler(
+            index_name=MIRROR_INDEX_NAME,
+            index_payload={"Status": "initializing"},
+            package_routes={},
+            app_version=APP_VERSION,
+            audit_log=audit,
+        )
+        server = ThreadingHTTPServer(
+            (policy["BindHost"], int(port)),
+            placeholder,
+        )
         actual_port = int(server.server_address[1])
-        index = StoreAPI.write_mirror_index(folder, host, actual_port)
+        requires_authorization = not policy["Loopback"]
+        token = ""
+        expires_epoch = 0
+        expires_at = ""
+        if requires_authorization:
+            token = str(bearer_token or create_bearer_token())
+            ttl = normalize_token_ttl(token_ttl_seconds)
+            expires_epoch = time.time() + ttl
+            expires_at = mirror_utc_timestamp(
+                datetime.fromtimestamp(
+                    expires_epoch,
+                    tz=timezone.utc,
+                )
+            )
+        index = StoreAPI.write_mirror_index(
+            folder,
+            policy["AdvertisedHost"],
+            actual_port,
+            tls_enabled=policy["TlsEnabled"],
+            requires_authorization=requires_authorization,
+            token_expires_at=expires_at,
+        )
+        routes = StoreAPI._mirror_package_routes(folder, index)
+        server.RequestHandlerClass = make_mirror_handler(
+            index_name=MIRROR_INDEX_NAME,
+            index_payload=index,
+            package_routes=routes,
+            app_version=APP_VERSION,
+            audit_log=audit,
+            bearer_token=token,
+            token_expires_at=expires_epoch,
+        )
+        if policy["TlsEnabled"]:
+            wrap_server_tls(
+                server,
+                policy["TlsCert"],
+                policy["TlsKey"],
+            )
+        server.mirror_policy = policy
+        server.mirror_bearer_token = token
+        server.mirror_token_expires_at = expires_at
+        server.mirror_audit_path = audit.path
         return server, index
 
     @staticmethod
@@ -6767,8 +6936,14 @@ def build_cli_parser():
     parser.add_argument("--ring", choices=STORE_RING_VALUES, default="Retail")
     parser.add_argument("--language", default="en-US")
     parser.add_argument("--market", default="US")
-    parser.add_argument("--host", default="127.0.0.1", help="Mirror bind host. Use 0.0.0.0 for LAN clients.")
+    parser.add_argument("--host", default="127.0.0.1", help="Mirror bind host. Loopback is the safe default.")
     parser.add_argument("--port", type=int, default=8765, help="Mirror bind port.")
+    parser.add_argument("--advertise-host", help="Client-facing mirror host. Required when --host is a wildcard address.")
+    parser.add_argument("--lan", action="store_true", help="Explicitly allow a non-loopback mirror with bearer authentication.")
+    parser.add_argument("--acknowledge-cleartext-risk", action="store_true", help="Allow authenticated LAN HTTP without TLS.")
+    parser.add_argument("--tls-cert", help="PEM certificate for an HTTPS mirror.")
+    parser.add_argument("--tls-key", help="PEM private key for an HTTPS mirror.")
+    parser.add_argument("--mirror-token-ttl", type=int, default=900, help="LAN bearer-token lifetime in seconds (60-3600).")
     parser.add_argument("--mirror-index-only", action="store_true", help="Write the mirror index and exit instead of serving forever.")
     parser.add_argument("--json", action="store_true", help="Emit a machine-readable JSON summary.")
     return parser
@@ -6998,23 +7173,59 @@ def _cli_package_workflow(args, stdout, stderr):
 
 def _cli_mirror(args, stdout, stderr):
     folder = os.path.abspath(args.mirror)
+    try:
+        policy = validate_network_policy(
+            args.host,
+            advertised_host=args.advertise_host,
+            lan_mode=args.lan,
+            acknowledge_cleartext=args.acknowledge_cleartext_risk,
+            tls_cert=args.tls_cert,
+            tls_key=args.tls_key,
+        )
+    except MirrorConfigurationError as exc:
+        _cli_print(f"error: {exc}", stderr)
+        return 2
+
     if args.mirror_index_only:
-        index = StoreAPI.write_mirror_index(folder, args.host, args.port)
+        index = StoreAPI.write_mirror_index(
+            folder,
+            policy["AdvertisedHost"],
+            args.port,
+            tls_enabled=policy["TlsEnabled"],
+        )
         summary = {
             "Action": "mirror-index",
-            "Host": args.host,
+            "AdvertisedHost": policy["AdvertisedHost"],
             "Port": int(args.port),
             **index,
         }
         _cli_emit_summary(summary, args.json, stdout)
         return 0 if index.get("PackageCount", 0) > 0 else 1
 
-    server, index = StoreAPI.create_mirror_server(folder, args.host, args.port)
+    try:
+        server, index = StoreAPI.create_mirror_server(
+            folder,
+            args.host,
+            args.port,
+            advertised_host=policy["AdvertisedHost"],
+            lan_mode=args.lan,
+            acknowledge_cleartext=args.acknowledge_cleartext_risk,
+            tls_cert=args.tls_cert,
+            tls_key=args.tls_key,
+            token_ttl_seconds=args.mirror_token_ttl,
+        )
+    except (MirrorConfigurationError, OSError, ssl.SSLError) as exc:
+        _cli_print(f"error: {exc}", stderr)
+        return 2
     actual_port = int(server.server_address[1])
     summary = {
         "Action": "mirror",
-        "Host": args.host,
+        "BindHost": policy["BindHost"],
+        "AdvertisedHost": policy["AdvertisedHost"],
         "Port": actual_port,
+        "TlsEnabled": policy["TlsEnabled"],
+        "LanMode": policy["LanMode"],
+        "AuditLog": MIRROR_AUDIT_FILENAME,
         **index,
     }
     if index.get("PackageCount", 0) == 0:
@@ -7023,6 +7234,18 @@ def _cli_mirror(args, stdout, stderr):
         _cli_emit_summary(summary, args.json, stdout)
         return 1
 
+    if server.mirror_bearer_token:
+        _cli_print(
+            (
+                "LAN bearer token (shown once; do not place it in URLs "
+                f"or logs): {server.mirror_bearer_token}"
+            ),
+            stderr,
+        )
+        _cli_print(
+            f"token expires: {server.mirror_token_expires_at}",
+            stderr,
+        )
     _cli_emit_summary(summary, args.json, stdout)
     try:
         server.serve_forever()

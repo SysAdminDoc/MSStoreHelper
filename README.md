@@ -49,7 +49,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - 🔐 **Licensing Reset** - Backs up ClipSVC state before verified service and package recovery
 - 🧹 **Cache Rebuild** - Backs up and verifies Store cache folders before recreating them
 - 🗂️ **Shared Offline Cache** - Mirrors downloaded AppX/MSIX artifacts to a shared folder for air-gapped reuse
-- **Local HTTP Mirror** - Serves a downloaded AppX/MSIX cache and JSON package index to nearby clinic PCs
+- **Allowlisted Package Mirror** - Serves only hash-current, trust-approved packages and a sanitized index; loopback is the default and LAN mode requires short-lived bearer authentication
 - 🧾 **DISM Provisioning Export** - Generates fleet-ready PowerShell scripts that call DISM for queued packages
 - 📋 **WinGet Import Export** - Saves selected Store apps as a reproducible WinGet `msstore` import manifest
 - **App Installer Export** - Writes `.appinstaller` manifests plus package folders for lightweight App Installer deployments
@@ -109,10 +109,23 @@ python MSStoreHelper.py --download Microsoft.WindowsTerminal --output C:\Package
 # Install from an elevated RMM shell without opening the GUI
 python MSStoreHelper.py --install Microsoft.WindowsTerminal --output C:\Packages --json
 
-# Pre-download and serve a local package mirror for nearby PCs
+# Pre-download and serve a loopback-only package mirror
 python MSStoreHelper.py --download Microsoft.WindowsTerminal --output C:\MSStoreMirror --json
-python MSStoreHelper.py --mirror C:\MSStoreMirror --host 0.0.0.0 --port 8765 --json
+python MSStoreHelper.py --mirror C:\MSStoreMirror --port 8765 --json
+
+# Explicit LAN HTTP (replace the advertised address with this PC's LAN IP).
+# The generated bearer token is shown once and expires after 15 minutes.
+python MSStoreHelper.py --mirror C:\MSStoreMirror --host 0.0.0.0 --advertise-host 192.0.2.10 --lan --acknowledge-cleartext-risk --port 8765 --json
+
+# Prefer HTTPS on a LAN when a PEM certificate and key are available.
+python MSStoreHelper.py --mirror C:\MSStoreMirror --host 0.0.0.0 --advertise-host mirror.example.test --lan --tls-cert C:\TLS\mirror.pem --tls-key C:\TLS\mirror-key.pem --port 8765 --json
 ```
+
+Mirror routes are limited to `/msstorehelper-mirror-index.json` and the
+trust-approved `/packages/...` entries listed in that index. Send the LAN
+token only in the `Authorization: Bearer ...` header—never in a URL. Access
+records are retained in a bounded, redacted
+`msstorehelper-mirror-access.jsonl` file beside the cache.
 
 ---
 
@@ -236,6 +249,7 @@ Packages are downloaded to `%USERPROFILE%\Downloads\MSStoreHelper`. Before any p
 ```
 MSStoreHelper/
 ├── MSStoreHelper.py               # Main application
+├── mirror_service.py              # Allowlisted HTTP routes, LAN auth, Range, and audit
 ├── store_sources.py               # Store source health, retry, and fallback helpers
 ├── msstore_package_resolution.py  # Package selection and install ordering
 ├── package_ingress.py             # Package filename, URL, and path boundary
@@ -247,6 +261,7 @@ MSStoreHelper/
 │   ├── test_package_resolution.py # Resolver tests
 │   ├── test_package_ingress.py    # Adversarial ingress and path tests
 │   ├── test_package_trust.py      # Trust, quarantine, and promotion-gate tests
+│   ├── test_mirror_service.py     # Mirror boundary, auth, Range, and audit tests
 │   ├── test_store_repair.py       # Store repair tests
 │   ├── test_offline_cache.py      # Shared cache tests
 │   ├── test_dism_export.py        # DISM export tests
