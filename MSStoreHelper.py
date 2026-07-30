@@ -55,7 +55,6 @@ from package_ingress import (
     validate_package_filename,
     validate_package_record,
     validate_package_url,
-    validate_response_redirects,
 )
 from package_trust import (
     PackageTrustError,
@@ -110,6 +109,15 @@ from store_sources import (
     source_status_summary,
 )
 from command_runner import run_command
+from http_downloader import (
+    DEFAULT_FREE_SPACE_RESERVE_BYTES,
+    DEFAULT_MAX_DOWNLOAD_BYTES,
+    DownloadCancelled,
+    HttpDownloadError,
+    StaleDownloadUrlError,
+    download_http_file,
+    validated_content_length,
+)
 from operation_coordinator import (
     OperationConflictError,
     OperationCoordinator,
@@ -1051,14 +1059,49 @@ class StoreAPI:
     
     @staticmethod
     def get_file_size(url):
+        return StoreAPI.get_file_size_for_package(url)
+
+    @staticmethod
+    def get_file_size_for_package(
+        url,
+        package=None,
+        max_bytes=DEFAULT_MAX_DOWNLOAD_BYTES,
+    ):
         try:
-            url = validate_package_url(url)
-            resp = requests.head(url, timeout=10, allow_redirects=True)
-            validate_response_redirects(url, resp)
-            size = resp.headers.get('content-length')
-            return int(size) if size else None
-        except:
+            current_url = validate_package_url(url)
+        except PackageIngressError:
             return None
+        for attempt in range(2):
+            try:
+                response = requests.head(
+                    current_url,
+                    timeout=10,
+                    allow_redirects=True,
+                    headers={
+                        "User-Agent": USER_AGENT,
+                        "Accept-Encoding": "identity",
+                    },
+                )
+                status_code = int(
+                    getattr(response, "status_code", 200) or 200
+                )
+                if status_code in {401, 403, 404, 410}:
+                    raise StaleDownloadUrlError(status_code)
+                return validated_content_length(
+                    current_url,
+                    response,
+                    max_bytes=max_bytes,
+                )
+            except StaleDownloadUrlError:
+                if attempt or not isinstance(package, dict):
+                    return None
+                refreshed = StoreAPI.refresh_package_url(package)
+                if not refreshed or refreshed == current_url:
+                    return None
+                current_url = refreshed
+            except Exception:
+                return None
+        return None
     
     @staticmethod
     def smart_select(packages, target_arch, prefer_exact_arch=False):
@@ -1393,6 +1436,8 @@ if ($sig.SignerCertificate) {{
             "ExpectedDependency",
             "TrustState",
             "TrustReport",
+            "DownloadEvidence",
+            "UrlRefreshedAt",
         ):
             if key in package:
                 metadata[key] = package.get(key)
@@ -1577,6 +1622,7 @@ if ($sig.SignerCertificate) {{
             "FileName", "PackageIdentity", "PackageRoleLabel", "Architecture", "FileType",
             "IsBundle", "IsEncrypted", "SizeBytes", "SizeStr", "Sha256", "AvailableVersion",
             "LocalPath", "CacheManifest", "StoreQuery", "DownloadStatus", "LastError",
+            "DownloadEvidence", "UrlRefreshedAt",
             "ExpectedProductId", "ExpectedPackageIdentity",
             "ExpectedPackageFamilyName", "ExpectedDependency",
             "TrustState", "TrustReport",
@@ -1596,6 +1642,7 @@ if ($sig.SignerCertificate) {{
             "SizeBytes", "SizeStr", "Sha256", "AvailableVersion", "PackageRole",
             "PackageRoleLabel", "InstallOrder", "PackageIdentity", "LocalPath",
             "CacheManifest", "StoreQuery", "DownloadStatus", "LastError",
+            "DownloadEvidence", "UrlRefreshedAt",
             "ExpectedProductId", "ExpectedPackageIdentity",
             "ExpectedPackageFamilyName", "ExpectedDependency",
             "TrustState", "TrustReport",
@@ -1787,9 +1834,11 @@ if ($sig.SignerCertificate) {{
         package=None,
         destination_root=None,
         cancel_event=None,
+        max_bytes=DEFAULT_MAX_DOWNLOAD_BYTES,
+        free_space_reserve_bytes=DEFAULT_FREE_SPACE_RESERVE_BYTES,
     ):
         try:
-            url = validate_package_url(url)
+            current_url = validate_package_url(url)
             validated_package = (
                 validate_package_record(package, require_url=False)
                 if package is not None
@@ -1811,7 +1860,6 @@ if ($sig.SignerCertificate) {{
                     "Download destination does not match the validated package filename"
                 )
             filepath = expected_path
-            part_path = ensure_path_within_root(destination_root, f"{filepath}.part")
 
             if package is not None:
                 package.update(validated_package)
@@ -1822,52 +1870,65 @@ if ($sig.SignerCertificate) {{
                     filepath,
                 )
                 if trust_ok:
+                    for suffix in (".part", ".part.json"):
+                        try:
+                            os.remove(f"{filepath}{suffix}")
+                        except FileNotFoundError:
+                            pass
                     return True, f"Already downloaded; {trust_message}"
                 return False, trust_message
 
-            existing = os.path.getsize(part_path) if os.path.exists(part_path) else 0
-            headers = {"Range": f"bytes={existing}-"} if existing else None
-            if cancel_event is not None and cancel_event.is_set():
-                return False, "Download cancelled before the request started"
-            with requests.get(url, stream=True, timeout=60, headers=headers) as r:
-                validate_response_redirects(url, r)
-                r.raise_for_status()
-                status_code = int(getattr(r, "status_code", 200) or 200)
-                if existing and status_code != 206:
-                    existing = 0
+            source_identity = StoreAPI.download_source_identity(
+                validated_package,
+                current_url,
+                filename,
+            )
+            evidence = None
+            for attempt in range(2):
+                try:
+                    evidence = download_http_file(
+                        current_url,
+                        filepath,
+                        filename=filename,
+                        source_identity=source_identity,
+                        get=requests.get,
+                        progress_callback=progress_callback,
+                        cancel_event=cancel_event,
+                        max_bytes=max_bytes,
+                        free_space_reserve_bytes=free_space_reserve_bytes,
+                        timeout=60,
+                        request_headers={"User-Agent": USER_AGENT},
+                    )
+                    break
+                except StaleDownloadUrlError:
+                    if attempt or package is None:
+                        raise
+                    refreshed = StoreAPI.refresh_package_url(package)
+                    if not refreshed or refreshed == current_url:
+                        raise
+                    current_url = refreshed
+            if evidence is None:
+                raise HttpDownloadError(
+                    "Download did not produce representation evidence"
+                )
 
-                content_range = r.headers.get("content-range", "")
-                total = 0
-                match = re.search(r"/(\d+)$", content_range)
-                if match:
-                    total = int(match.group(1))
-                elif r.headers.get('content-length'):
-                    total = int(r.headers.get('content-length', 0)) + existing
-                
-                mode = "ab" if existing else "wb"
-                with open(part_path, mode) as f:
-                    downloaded = existing
-                    for chunk in r.iter_content(chunk_size=8192):
-                        if cancel_event is not None and cancel_event.is_set():
-                            f.flush()
-                            os.fsync(f.fileno())
-                            return (
-                                False,
-                                "Download cancelled; partial file preserved for resume",
-                            )
-                        if not chunk:
-                            continue
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if progress_callback and total:
-                            progress_callback(downloaded / total)
-                if total and downloaded != total:
-                    return False, f"Downloaded {downloaded} bytes; expected {total} bytes"
-
-            os.replace(part_path, filepath)
             trust_package = package or {
                 "FileName": filename,
-                "Url": url,
+                "Url": current_url,
+            }
+            trust_package["Url"] = current_url
+            trust_package["LocalPath"] = filepath
+            trust_package["SizeBytes"] = evidence["SizeBytes"]
+            trust_package["DownloadEvidence"] = {
+                key: evidence.get(key)
+                for key in (
+                    "EffectiveUrl",
+                    "ETag",
+                    "LastModified",
+                    "SizeBytes",
+                    "Sha256",
+                    "Resumed",
+                )
             }
             report = StoreAPI.inspect_package_trust(
                 filepath,
@@ -1876,7 +1937,7 @@ if ($sig.SignerCertificate) {{
             StoreAPI.write_artifact_manifest(
                 trust_package,
                 filepath,
-                source_url=url,
+                source_url=current_url,
             )
             if report.get("AutomationAllowed") is True:
                 return True, (
@@ -1895,8 +1956,62 @@ if ($sig.SignerCertificate) {{
                 if reasons
                 else "Downloaded package failed trust checks"
             )
-        except Exception as e:
-            return False, str(e)
+        except (DownloadCancelled, HttpDownloadError, PackageIngressError) as exc:
+            return False, str(exc)
+        except Exception as exc:
+            return False, str(exc)
+
+    @staticmethod
+    def download_source_identity(package, url, filename):
+        query = (package or {}).get("StoreQuery") or {}
+        product_id = str(
+            (package or {}).get("ExpectedProductId")
+            or query.get("ProductId")
+            or ""
+        ).strip().lower()
+        if product_id:
+            return f"product:{product_id}|file:{filename.lower()}"
+        parsed = urlsplit(validate_package_url(url))
+        return (
+            f"url:{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+            f"{parsed.path}|file:{filename.lower()}"
+        )
+
+    @staticmethod
+    def refresh_package_url(package):
+        if not isinstance(package, dict):
+            return None
+        query = package.get("StoreQuery") or {}
+        product_id = str(
+            package.get("ExpectedProductId")
+            or query.get("ProductId")
+            or ""
+        ).strip()
+        filename = package.get("FileName")
+        if not product_id or not filename:
+            return None
+        diagnostic = StoreAPI.get_packages_with_diagnostics(
+            product_id,
+            query.get("Ring"),
+            query.get("Language"),
+            query.get("Market"),
+        )
+        match = next(
+            (
+                candidate
+                for candidate in diagnostic.get("Packages", [])
+                if str(candidate.get("FileName", "")).lower()
+                == str(filename).lower()
+            ),
+            None,
+        )
+        if match is None:
+            return None
+        refreshed = validate_package_record(match, require_url=True)
+        package["Url"] = refreshed["Url"]
+        package["StoreQuery"] = diagnostic.get("Query") or query
+        package["UrlRefreshedAt"] = datetime.now(timezone.utc).isoformat()
+        return refreshed["Url"]
 
     @staticmethod
     def is_cacheable_artifact(filename):
@@ -5796,10 +5911,7 @@ Fixes "needs to be online" and similar errors.
     
     def _fetch_sizes_async(self):
         packages = tuple(
-            {
-                "FileName": package.get("FileName", ""),
-                "Url": package.get("Url", ""),
-            }
+            self._package_snapshot(package)
             for package in self.current_packages
             if package.get("FileName") and package.get("Url")
         )
@@ -5832,12 +5944,15 @@ Fixes "needs to be online" and similar errors.
                 index / total,
                 f"Reading package sizes ({index + 1}/{total})",
             )
-            size = StoreAPI.get_file_size(package["Url"])
+            size = StoreAPI.get_file_size_for_package(
+                package["Url"],
+                package,
+            )
             if size > 0:
                 context.succeeded(filename, "Package size resolved", SizeBytes=size)
                 self._post_ui(
-                    lambda name=filename, value=size: (
-                        self._apply_package_size(name, value)
+                    lambda name=filename, value=size, refreshed=package.get("Url"): (
+                        self._apply_package_size(name, value, refreshed)
                     )
                 )
             else:
@@ -5845,11 +5960,13 @@ Fixes "needs to be online" and similar errors.
         context.progress(1.0, f"Size lookup processed {total} package(s)")
         self._post_ui(self._update_selection_info)
 
-    def _apply_package_size(self, filename, size):
+    def _apply_package_size(self, filename, size, refreshed_url=None):
         for package in self.current_packages:
             if package.get("FileName") == filename:
                 package["SizeBytes"] = int(size)
                 package["SizeStr"] = format_size(size)
+                if refreshed_url:
+                    package["Url"] = refreshed_url
                 break
         for row in self.package_rows:
             if row.pkg_data.get("FileName") == filename:
@@ -6541,24 +6658,7 @@ Fixes "needs to be online" and similar errors.
                 cancel_event=context.cancel_event,
             )
 
-            if context.cancellation_requested:
-                pkg["DownloadStatus"] = (
-                    "Partial" if os.path.exists(f"{filepath}.part") else "Pending"
-                )
-                pkg["LastError"] = "Download cancelled"
-                context.cancelled(
-                    fname,
-                    "Download stopped at a resumable checkpoint",
-                    DownloadStatus=pkg["DownloadStatus"],
-                )
-                self._post_ui(
-                    lambda n=fname: self._set_queue_item_status(
-                        n,
-                        "Cancelled",
-                        Theme.WARNING,
-                    )
-                )
-            elif success:
+            if success:
                 pkg["DownloadStatus"] = "Downloaded"
                 pkg.pop("LastError", None)
                 context.succeeded(
@@ -6575,7 +6675,7 @@ Fixes "needs to be online" and similar errors.
                     )
                 )
                 self._post_ui(lambda n=fname: self._log("SUCCESS", f"  Downloaded: {n}"))
-                if plan["SharedCacheEnabled"]:
+                if plan["SharedCacheEnabled"] and not context.cancellation_requested:
                     cache_success, cache_msg = StoreAPI.cache_downloaded_artifact(
                         pkg,
                         plan["SharedCachePath"],
@@ -6588,6 +6688,23 @@ Fixes "needs to be online" and similar errors.
                             cache_msg,
                             Package=fname,
                         )
+            elif context.cancellation_requested:
+                pkg["DownloadStatus"] = (
+                    "Partial" if os.path.exists(f"{filepath}.part") else "Pending"
+                )
+                pkg["LastError"] = "Download cancelled"
+                context.cancelled(
+                    fname,
+                    "Download stopped at a resumable checkpoint",
+                    DownloadStatus=pkg["DownloadStatus"],
+                )
+                self._post_ui(
+                    lambda n=fname: self._set_queue_item_status(
+                        n,
+                        "Cancelled",
+                        Theme.WARNING,
+                    )
+                )
             else:
                 if pkg.get("TrustState") == TRUST_STATE_REVIEW_REQUIRED:
                     pkg["DownloadStatus"] = "Quarantined"

@@ -6,18 +6,31 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from MSStoreHelper import StoreAPI
+from MSStoreHelper import StoreAPI, USER_AGENT
 from test_trust_utils import inspect_as_trusted, mark_package_trusted
 
 
 class FakeDownloadResponse:
-    def __init__(self, chunks, content_length=None, error_at=None, status_code=200, content_range=None):
+    def __init__(
+        self,
+        chunks,
+        content_length=None,
+        error_at=None,
+        status_code=200,
+        content_range=None,
+        etag=None,
+        last_modified=None,
+    ):
         self.chunks = chunks
         self.headers = {}
         if content_length is not None:
             self.headers["content-length"] = str(content_length)
         if content_range is not None:
             self.headers["content-range"] = content_range
+        if etag is not None:
+            self.headers["etag"] = etag
+        if last_modified is not None:
+            self.headers["last-modified"] = last_modified
         self.error_at = error_at
         self.status_code = status_code
 
@@ -241,27 +254,50 @@ class OfflineCacheTests(unittest.TestCase):
     def test_download_file_resumes_existing_part_with_range_request(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = os.path.join(temp_dir, "Contoso.App_1.0.0.0_x64__test.msix")
-            with open(f"{target}.part", "wb") as handle:
-                handle.write(b"pack")
-
             captured = {}
 
-            def fake_get(_url, **kwargs):
+            def interrupted_get(_url, **_kwargs):
+                return FakeDownloadResponse(
+                    [b"pack", b"age"],
+                    content_length=7,
+                    error_at=1,
+                    etag='"representation-v1"',
+                )
+
+            with patch("MSStoreHelper.requests.get", side_effect=interrupted_get):
+                ok, _message = StoreAPI.download_file(
+                    "https://example.invalid/app.msix",
+                    target,
+                )
+            self.assertFalse(ok)
+            self.assertTrue(os.path.exists(f"{target}.part.json"))
+
+            def resumed_get(_url, **kwargs):
                 captured["headers"] = kwargs.get("headers")
                 return FakeDownloadResponse(
                     [b"age"],
                     content_length=3,
                     status_code=206,
                     content_range="bytes 4-6/7",
+                    etag='"representation-v1"',
                 )
 
-            with patch("MSStoreHelper.requests.get", side_effect=fake_get):
+            with patch("MSStoreHelper.requests.get", side_effect=resumed_get):
                 with patch.object(StoreAPI, "inspect_package_trust", side_effect=inspect_as_trusted):
                     ok, message = StoreAPI.download_file("https://example.invalid/app.msix", target)
 
             self.assertTrue(ok, message)
-            self.assertEqual(captured["headers"], {"Range": "bytes=4-"})
+            self.assertEqual(
+                captured["headers"],
+                {
+                    "User-Agent": USER_AGENT,
+                    "Accept-Encoding": "identity",
+                    "Range": "bytes=4-",
+                    "If-Range": '"representation-v1"',
+                },
+            )
             self.assertFalse(os.path.exists(f"{target}.part"))
+            self.assertFalse(os.path.exists(f"{target}.part.json"))
             with open(target, "rb") as handle:
                 self.assertEqual(handle.read(), b"package")
 
@@ -291,13 +327,14 @@ class OfflineCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = os.path.join(temp_dir, "Contoso.App_1.0.0.0_x64__test.msix")
 
-            with patch("MSStoreHelper.requests.get", return_value=FakeDownloadResponse([b"partial", b"tail"], content_length=11, error_at=1)):
+            with patch("MSStoreHelper.requests.get", return_value=FakeDownloadResponse([b"partial", b"tail"], content_length=11, error_at=1, etag='"partial-v1"')):
                 ok, message = StoreAPI.download_file("https://example.invalid/app.msix", target)
 
             self.assertFalse(ok)
             self.assertIn("network dropped", message)
             self.assertFalse(os.path.exists(target))
             self.assertTrue(os.path.exists(f"{target}.part"))
+            self.assertTrue(os.path.exists(f"{target}.part.json"))
             with open(f"{target}.part", "rb") as handle:
                 self.assertEqual(handle.read(), b"partial")
 

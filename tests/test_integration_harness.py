@@ -38,7 +38,10 @@ class FakeResponse:
 
 
 class FakeDownloadResponse:
-    headers = {"content-length": "11"}
+    headers = {
+        "content-length": "11",
+        "etag": '"integration-v1"',
+    }
 
     def __enter__(self):
         return self

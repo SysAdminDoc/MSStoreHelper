@@ -32,7 +32,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - **Reviewable Quarantine** - Keeps identity-valid packages with unknown product bindings out of install, rollback, cache, mirror, and export workflows until the user reviews the exact source, identity, publisher, manifest, revocation state, and hash
 - **Package Ingress Guard** - Rejects unsafe package names, URLs, redirects, persisted paths, cache entries, and export staging before they can reach disk or PowerShell
 - 🔐 **Verified Downloads** - Writes packages atomically and records SHA-256 metadata before cache reuse
-- **Resumable Downloads** - Persists the queue across restarts and resumes `.part` downloads with HTTP Range requests
+- **Verified Resumable Downloads** - Binds `.part` data to source identity, validators, expected length, and SHA-256 progress before using `If-Range`; enforces package-size and disk-reserve limits and refreshes expired Store URLs
 - **Keep Updated Mode** - Re-checks installed catalog apps and queues newer Store bundles while the app is open
 - **Rollback Cache** - Keeps the last two cached package versions and can reinstall the previous cached app version
 - **Package Diff** - Compares cached package versions for manifest capability and dependency changes

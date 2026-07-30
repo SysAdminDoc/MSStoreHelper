@@ -23,6 +23,9 @@ All notable changes to MSStoreHelper will be documented in this file.
 - Added one typed operation coordinator for download, install, rollback, package diff, Intune export, size lookup, repair, and restore, with immutable worker inputs, correlation IDs, truthful partial results, and deterministic cancellation.
 - Replaced critical daemon workers with non-daemon operations that finish or cancel safely before the window closes, and routed worker UI changes through a shutdown-safe dispatcher.
 - Added mandatory subprocess deadlines with terminate/kill fallback, a bounded atomic local operation journal, diagnostic history export, and CLI partial-success exit code `2`.
+- Bound resumed downloads to a verified source identity and strong ETag or Last-Modified validator, with exact `If-Range`/`Content-Range`, safe HTTP 200 fallback, and HTTP 416 recovery semantics.
+- Added fail-closed package byte and disk-reserve limits to redirected HEAD/GET requests, hash-bound redacted partial sidecars, and cancellation rules that discard non-resumable fragments.
+- Added automatic refresh of expired package URLs from persisted product/ring/language/market metadata before one bounded retry.
 
 ## [v3.36.0] - 2026-07-29
 
