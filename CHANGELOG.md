@@ -29,6 +29,9 @@ All notable changes to MSStoreHelper will be documented in this file.
 - Added one versioned state repository for profiles, download queues, cache manifests, repair manifests, operation history, resume metadata, trust reviews, and mirror state, with same-directory atomic replacement and inter-process serialization.
 - Corrupt or future-schema state is now quarantined instead of silently discarded, and the desktop app offers to open the preserved evidence before continuing with safe defaults.
 - Cache history now uses identity, architecture, package type, version, ring, language, market, and source fingerprints so rollback and package diff cannot pair incompatible artifacts.
+- Added typed Windows capability and AppX inventory preflights that distinguish successful, empty, unavailable, denied, timed-out, and policy-blocked results across current-user and machine scopes.
+- LTSC Gap Scan, Keep Updated, install, rollback, and CLI install now stop before bulk queueing or mutation when inventory, required services, or Store-source state is unknown, and report an exact next action.
+- Diagnostics now includes OS edition/build, elevation context, Store/App Installer policy, required service state, endpoint health, reboot-pending evidence, and the last capability result.
 
 ## [v3.36.0] - 2026-07-29
 

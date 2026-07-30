@@ -180,6 +180,101 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(payload["Failed"], 0)
         self.assertEqual(payload["Packages"][-1]["Status"], "skipped")
 
+    def test_run_cli_install_blocks_before_download_on_unknown_inventory(self):
+        package = {
+            "FileName": (
+                "Microsoft.WindowsTerminal_1.0.0.0_"
+                "x64__8wekyb3d8bbwe.msixbundle"
+            ),
+            "Url": "https://example.test/terminal.msixbundle",
+            "Architecture": "x64",
+            "FileType": "MSIXBUNDLE",
+        }
+        capability = {
+            "SchemaVersion": 1,
+            "Status": "success",
+            "Blockers": [],
+            "Network": {
+                "Status": "available",
+                "Endpoints": [{
+                    "Key": "rg-adguard",
+                    "Available": True,
+                }],
+            },
+        }
+        inventory = {
+            "SchemaVersion": 1,
+            "Status": "timed-out",
+            "Known": False,
+            "Scope": "current-user",
+            "Records": [],
+            "Identities": [],
+            "Versions": {},
+            "Message": "The current-user inventory timed out.",
+            "NextAction": "Retry after AppX servicing completes.",
+        }
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("MSStoreHelper.IS_ADMIN", True):
+                with patch.object(
+                    StoreAPI,
+                    "get_packages_with_diagnostics",
+                    return_value={
+                        "Packages": [package],
+                        "Errors": [],
+                        "Query": {
+                            "ProductId": "9N0DX20HK701",
+                        },
+                    },
+                ):
+                    with patch.object(
+                        StoreAPI,
+                        "smart_select",
+                        return_value=[package.copy()],
+                    ):
+                        with patch.object(
+                            StoreAPI,
+                            "order_packages_for_install",
+                            side_effect=lambda packages, _arch: packages,
+                        ):
+                            with patch.object(
+                                StoreAPI,
+                                "get_windows_capability_report",
+                                return_value=capability,
+                            ):
+                                with patch.object(
+                                    StoreAPI,
+                                    "get_installed_appx_versions",
+                                    return_value=inventory,
+                                ):
+                                    with patch.object(
+                                        StoreAPI,
+                                        "download_file",
+                                    ) as download_mock:
+                                        exit_code = run_cli(
+                                            [
+                                                "--install",
+                                                "Microsoft.WindowsTerminal",
+                                                "--output",
+                                                temp_dir,
+                                                "--json",
+                                            ],
+                                            stdout,
+                                            stderr,
+                                        )
+
+        self.assertEqual(exit_code, 1)
+        download_mock.assert_not_called()
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["Operation"]["State"], "failed")
+        self.assertEqual(
+            payload["InstalledInventory"]["Status"],
+            "timed-out",
+        )
+        self.assertIn("Next action:", stderr.getvalue())
+
     def test_main_with_args_runs_cli_without_creating_window(self):
         with patch("MSStoreHelper.run_cli", return_value=0) as cli_mock:
             with patch("MSStoreHelper.MSStoreHelperApp") as app_mock:

@@ -240,6 +240,7 @@ def prepare_diagnostic_entries(
     powershell_transcript,
     repair_manifests,
     operation_history=None,
+    capability_report=None,
     path_tokens=None,
 ):
     structured = {
@@ -248,6 +249,10 @@ def prepare_diagnostic_entries(
         "queue.json": queue,
         "repair-manifests.json": repair_manifests,
         "operation-history.json": operation_history or [],
+        "windows-capabilities.json": capability_report or {
+            "SchemaVersion": 1,
+            "Status": "unknown",
+        },
     }
     entries = {}
     for name, value in structured.items():

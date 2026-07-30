@@ -37,6 +37,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - **Rollback Cache** - Keeps the last two cached package versions and can reinstall the previous cached app version
 - **Package Diff** - Compares cached package versions for manifest capability and dependency changes
 - **Crash-Safe State** - Versions and atomically replaces local profile, queue, cache, repair, resume, mirror, and operation state; invalid generations are quarantined for recovery instead of overwritten
+- **Windows Capability Preflight** - Distinguishes current-user and elevated machine inventory from denial, timeout, policy, service, endpoint, and reboot conditions before queueing or mutation
 - **Source Health** - Detects StoreEdgeFD, RG-Adguard, WinGet, and Store CLI availability with fallback hints
 - **Store Query Controls** - Persists RG-Adguard ring, Store language, and market for localized package lookup and deployment artifacts
 - **Verified Python Setup** - Uses exact transitive pins, SHA-256 artifact locks, and tested offline wheelhouses
@@ -144,9 +145,9 @@ records are retained in a bounded, redacted
 2. **Browse Categories**: Click a category in the sidebar to see curated app lists
 3. **Store Query**: Click **"Query: Retail / en-US / US"** to change RG-Adguard ring, Store language, or market
 4. **Quick Actions**: Use presets for common tasks like LTSC Essentials, Store repair, or gaming setup
-5. **Scan LTSC Gaps**: Click **"🔎 Scan LTSC Gaps"** to detect and queue missing tracked components
+5. **Scan LTSC Gaps**: Run elevated, then click **"🔎 Scan LTSC Gaps"**; machine and provisioned-package inventory must complete successfully before missing components can be queued
 6. **Xbox Core**: Click **"🎮 Queue Xbox Core"** to queue Xbox Identity and Gaming Services through the pinned install path
-7. **Keep Updated**: Enable **"Keep updated"** or click **"Check"** to queue newer packages for installed catalog apps
+7. **Keep Updated**: Enable **"Keep updated"** or click **"Check"** to queue newer packages for the verified current-user inventory; unavailable inventory or package sources stop without claiming the device is current
 8. **Pin Favorites**: Select apps and click **"Pin Selected"** to show them in the Workspace for this Windows user
 9. **Release Notes**: Click **"Notes"** on an app row to fetch Microsoft Store page notes
 
@@ -264,6 +265,7 @@ MSStoreHelper/
 ├── package_trust.py               # Signature, manifest, identity, and promotion policy
 ├── repair_transaction.py          # Fail-closed repair, backup, and restore engine
 ├── state_repository.py            # Versioned atomic state, locking, migration, and recovery
+├── windows_capabilities.py        # Scoped AppX inventory and Windows preflight evidence
 ├── pyproject.toml                 # Python package metadata
 ├── requirements.in                # Canonical fully pinned dependency graph
 ├── requirements.txt               # Aggregate artifact-hashed Windows lock
@@ -292,6 +294,7 @@ MSStoreHelper/
 │   ├── test_package_diff.py       # Cached manifest diff tests
 │   ├── test_user_profile.py       # Search history and favorites tests
 │   ├── test_state_repository.py   # Crash, migration, quarantine, and concurrency tests
+│   ├── test_windows_capabilities.py # Inventory status and preflight tests
 │   ├── test_dependency_bootstrap.py # Dependency setup tests
 │   ├── test_release_notes.py      # Store page release-note tests
 │   └── test_store_sources.py      # Source health and fallback tests

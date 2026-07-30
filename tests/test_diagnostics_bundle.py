@@ -161,6 +161,15 @@ class DiagnosticsBundleTests(unittest.TestCase):
                     "StoreQuery": {"Ring": "WIS", "Language": "pt-BR", "Market": "BR"},
                 }],
                 log_text,
+                {
+                    "SchemaVersion": 1,
+                    "Status": "denied",
+                    "Context": {
+                        "InventoryScope": "current-user",
+                        "IsElevated": False,
+                    },
+                    "NextAction": "Run elevated for machine inventory.",
+                },
             )
 
             with zipfile.ZipFile(bundle_path) as archive:
@@ -171,10 +180,14 @@ class DiagnosticsBundleTests(unittest.TestCase):
                 self.assertIn("app-log.txt", names)
                 self.assertIn("powershell-transcript.txt", names)
                 self.assertIn("operation-history.json", names)
+                self.assertIn("windows-capabilities.json", names)
                 diagnostics = json.loads(archive.read("diagnostics.json"))
                 queue = json.loads(archive.read("queue.json"))
                 operation_history = json.loads(
                     archive.read("operation-history.json")
+                )
+                capability_report = json.loads(
+                    archive.read("windows-capabilities.json")
                 )
                 app_log = archive.read("app-log.txt").decode("utf-8")
                 transcript = archive.read("powershell-transcript.txt").decode("utf-8")
@@ -183,6 +196,7 @@ class DiagnosticsBundleTests(unittest.TestCase):
             self.assertEqual(diagnostics["QueueCount"], 1)
             self.assertEqual(diagnostics["OperationHistoryCount"], 1)
             self.assertEqual(operation_history[0]["State"], "succeeded")
+            self.assertEqual(capability_report["Status"], "denied")
             self.assertEqual(queue[0]["StoreQuery"]["Language"], "pt-BR")
             self.assertNotIn(temp_dir, json.dumps(queue))
             self.assertNotIn("password=secret", app_log)

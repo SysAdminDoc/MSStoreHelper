@@ -133,6 +133,15 @@ from operation_coordinator import (
     OperationJournal,
     OperationState,
 )
+from windows_capabilities import (
+    InventoryDiscoveryError,
+    capability_blocking_text,
+    capability_summary,
+    inventory_failure_text,
+    inventory_is_known,
+    probe_windows_capabilities,
+    query_appx_inventory,
+)
 
 MINIMUM_PYTHON = (3, 11)
 
@@ -2027,6 +2036,7 @@ if ($sig.SignerCertificate) {{
         source_health,
         queue,
         log_text,
+        capability_report=None,
     ):
         queue_metadata = StoreAPI.diagnostic_queue_metadata(queue)
         repair_manifests = StoreAPI.collect_recent_repair_manifests()
@@ -2068,6 +2078,7 @@ if ($sig.SignerCertificate) {{
             ),
             repair_manifests=repair_manifests,
             operation_history=operation_history,
+            capability_report=capability_report,
             path_tokens={"APP_DATA": APP_DATA_DIR},
         )
 
@@ -2081,6 +2092,7 @@ if ($sig.SignerCertificate) {{
         source_health,
         queue,
         log_text,
+        capability_report=None,
     ):
         entries = StoreAPI.prepare_diagnostics_bundle(
             app_version,
@@ -2090,6 +2102,7 @@ if ($sig.SignerCertificate) {{
             source_health,
             queue,
             log_text,
+            capability_report,
         )
         return write_prepared_bundle(bundle_path, entries)
 
@@ -3741,46 +3754,42 @@ if ($sig.SignerCertificate) {{
             return False, str(e)
 
     @staticmethod
-    def get_installed_package_version(package_name):
-        try:
-            safe_name = package_name.replace("'", "''")
-            cmd = (
-                f"Get-AppxPackage -Name '{safe_name}' | "
-                "Sort-Object -Property Version -Descending | "
-                "Select-Object -First 1 -ExpandProperty Version"
-            )
-            result = run_command(
-                [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
-                timeout=30,
-            )
-            if result.returncode != 0:
-                return None
-            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-            return lines[-1] if lines else None
-        except Exception:
-            return None
+    def get_windows_capability_report(source_health=None):
+        return probe_windows_capabilities(
+            run_command,
+            POWERSHELL_EXE,
+            is_admin=IS_ADMIN,
+            source_health=source_health,
+        )
+
+    @staticmethod
+    def get_installed_appx_inventory(scope="current-user"):
+        result = query_appx_inventory(
+            run_command,
+            POWERSHELL_EXE,
+            scope=scope,
+            is_admin=IS_ADMIN,
+        )
+        result["Versions"] = StoreAPI.normalize_installed_appx_versions(
+            result.get("Records")
+        )
+        return result
+
+    @staticmethod
+    def get_installed_package_version(package_name, inventory=None):
+        inventory = (
+            inventory
+            if inventory is not None
+            else StoreAPI.get_installed_appx_versions()
+        )
+        if not inventory_is_known(inventory):
+            raise InventoryDiscoveryError(inventory)
+        key = str(package_name or "").strip().lower()
+        return (inventory.get("Versions") or {}).get(key)
 
     @staticmethod
     def get_installed_appx_identities():
-        cmd = (
-            "$installed = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name); "
-            "$provisioned = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Select-Object -ExpandProperty DisplayName); "
-            "@($installed + $provisioned | Where-Object { $_ } | Sort-Object -Unique) | ConvertTo-Json -Compress"
-        )
-        try:
-            result = run_command(
-                [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
-                timeout=60,
-            )
-            if result.returncode != 0 or not result.stdout.strip():
-                return set()
-
-            payload = json.loads(result.stdout)
-            if isinstance(payload, str):
-                payload = [payload]
-            return {str(identity).lower() for identity in payload if identity}
-        except Exception:
-            return set()
+        return StoreAPI.get_installed_appx_inventory("machine")
 
     @staticmethod
     def normalize_installed_appx_versions(records):
@@ -3808,31 +3817,19 @@ if ($sig.SignerCertificate) {{
 
     @staticmethod
     def get_installed_appx_versions():
-        cmd = (
-            "$installed = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | "
-            "Select-Object @{Name='Name';Expression={$_.Name}}, @{Name='Version';Expression={[string]$_.Version}}); "
-            "$provisioned = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | "
-            "Select-Object @{Name='Name';Expression={$_.DisplayName}}, @{Name='Version';Expression={[string]$_.Version}}); "
-            "@($installed + $provisioned | Where-Object { $_.Name }) | ConvertTo-Json -Compress"
-        )
-        try:
-            result = run_command(
-                [POWERSHELL_EXE, "-NoProfile", "-Command", cmd],
-                timeout=60,
-            )
-            if result.returncode != 0 or not result.stdout.strip():
-                return {}
-
-            payload = json.loads(result.stdout)
-            if isinstance(payload, dict):
-                payload = [payload]
-            return StoreAPI.normalize_installed_appx_versions(payload)
-        except Exception:
-            return {}
+        return StoreAPI.get_installed_appx_inventory("current-user")
 
     @staticmethod
     def detect_missing_ltsc_components(installed_identities=None):
-        installed = installed_identities if installed_identities is not None else StoreAPI.get_installed_appx_identities()
+        installed = (
+            installed_identities
+            if installed_identities is not None
+            else StoreAPI.get_installed_appx_identities()
+        )
+        if isinstance(installed, dict) and "Status" in installed:
+            if not inventory_is_known(installed):
+                raise InventoryDiscoveryError(installed)
+            installed = installed.get("Identities") or []
         installed = {str(identity).lower() for identity in installed}
         catalog = catalog_apps_by_name()
         missing = []
@@ -3908,9 +3905,12 @@ if ($sig.SignerCertificate) {{
         return order_packages_for_install(updates, target_arch)
 
     @staticmethod
-    def should_skip_installed_package(package):
+    def should_skip_installed_package(package, inventory=None):
         package_name = package.get("PackageIdentity") or package_identity(package["FileName"])
-        installed_version = StoreAPI.get_installed_package_version(package_name)
+        installed_version = StoreAPI.get_installed_package_version(
+            package_name,
+            inventory,
+        )
         if not installed_version:
             return False, installed_version, package_name
         return installed_version_satisfies_package(package, installed_version), installed_version, package_name
@@ -4373,6 +4373,37 @@ class MSStoreHelperApp(ctk.CTk):
         self.package_rows = []
         self.current_view = "welcome"
         self.source_health = []
+        self.capability_report = {
+            "SchemaVersion": 1,
+            "Status": "pending",
+            "Platform": {
+                "System": "Windows",
+                "Edition": "unknown",
+                "Build": "unknown",
+                "Architecture": SYSTEM_ARCH,
+            },
+            "Context": {
+                "InventoryScope": (
+                    "machine" if IS_ADMIN else "current-user"
+                ),
+                "IsElevated": bool(IS_ADMIN),
+            },
+            "Policies": {
+                "Store": "unknown",
+                "AppInstaller": "unknown",
+            },
+            "Services": [],
+            "Network": {
+                "Status": "unknown",
+                "Endpoints": [],
+            },
+            "RebootPending": {
+                "Pending": None,
+                "State": "unknown",
+            },
+            "Blockers": [],
+            "Warnings": [],
+        }
         self.arch_options = [f"Auto ({SYSTEM_ARCH})", "x64", "x86", "arm64", "arm", "neutral"]
         self.arch_override_var = ctk.StringVar(value=self.arch_options[0])
         self.package_scroll = None
@@ -6024,10 +6055,191 @@ Fixes "needs to be online" and similar errors.
             return
 
         self.source_health = statuses
+        report = StoreAPI.get_windows_capability_report(statuses)
+        self.capability_report = report
         self._post_ui(self._refresh_workspace_source_status)
         for status in statuses:
             level = "SUCCESS" if status.get("Available") else "WARNING"
             self._post_ui(lambda s=status, lvl=level: self._log(lvl, source_status_summary(s)))
+        self._post_ui(
+            lambda value=copy.deepcopy(report): self._log(
+                (
+                    "SUCCESS"
+                    if value.get("Status") == "success"
+                    else "WARNING"
+                ),
+                capability_summary(value),
+            )
+        )
+        for issue in (
+            list(report.get("Blockers") or [])
+            + list(report.get("Warnings") or [])
+        ):
+            self._post_ui(
+                lambda item=copy.deepcopy(issue): self._log(
+                    "WARNING",
+                    " ".join(
+                        text
+                        for text in (
+                            str(item.get("Message") or ""),
+                            (
+                                f"Next action: {item.get('NextAction')}"
+                                if item.get("NextAction")
+                                else ""
+                            ),
+                        )
+                        if text
+                    ),
+                )
+            )
+
+    def _windows_workflow_preflight(
+        self,
+        required_sources=None,
+        required_services=None,
+    ):
+        statuses = self.source_health
+        if required_sources:
+            statuses = StoreAPI.detect_source_health()
+            self.source_health = statuses
+        report = StoreAPI.get_windows_capability_report(statuses)
+        self.capability_report = report
+        self._post_ui(
+            lambda value=copy.deepcopy(report): self._log(
+                (
+                    "SUCCESS"
+                    if value.get("Status") == "success"
+                    else "WARNING"
+                ),
+                capability_summary(value),
+            )
+        )
+        blocker = capability_blocking_text(
+            report,
+            required_sources=set(required_sources or set()),
+            required_services=set(required_services or set()),
+        )
+        return report, blocker
+
+    def _post_windows_blocker(
+        self,
+        workflow,
+        message,
+        *,
+        status="blocked",
+        show_dialog=True,
+    ):
+        self._post_ui(
+            lambda label=workflow, state=status: self._update_status(
+                f"{label} unavailable — {state}",
+                Theme.DANGER,
+            )
+        )
+        self._post_ui(
+            lambda text=message: self._log("ERROR", text)
+        )
+        if show_dialog:
+            self._post_ui(
+                lambda label=workflow, text=message: (
+                    self._show_windows_blocker_dialog(label, text)
+                )
+            )
+
+    def _post_inventory_failure(
+        self,
+        workflow,
+        result,
+        *,
+        show_dialog=True,
+    ):
+        message = inventory_failure_text(result)
+        self._post_windows_blocker(
+            workflow,
+            message,
+            status=result.get("Status") or "unavailable",
+            show_dialog=show_dialog,
+        )
+
+    def _show_windows_blocker_dialog(self, workflow, message):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(f"{workflow} unavailable")
+        dialog.geometry("760x430")
+        dialog.minsize(600, 380)
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(2, weight=1)
+        ctk.CTkLabel(
+            dialog,
+            text=f"{workflow} stopped safely",
+            font=("Segoe UI Semibold", 20),
+            anchor="w",
+        ).grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=30,
+            pady=(32, 0),
+        )
+        ctk.CTkLabel(
+            dialog,
+            text=(
+                "MSStoreHelper did not infer package absence and did "
+                "not queue or mutate anything."
+            ),
+            font=("Segoe UI", 12),
+            text_color=Theme.TEXT_SECONDARY,
+            anchor="w",
+            justify="left",
+            wraplength=680,
+        ).grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=30,
+            pady=(6, 14),
+        )
+        details = ctk.CTkTextbox(
+            dialog,
+            font=("Segoe UI", 12),
+            text_color=Theme.WARNING,
+            fg_color=Theme.BG_DARK,
+            height=140,
+            wrap="word",
+        )
+        details.grid(
+            row=2,
+            column=0,
+            sticky="nsew",
+            padx=30,
+        )
+        details.insert(
+            "1.0",
+            message.replace(
+                " Next action:",
+                "\n\nNext action:",
+                1,
+            ),
+        )
+        details.configure(state="disabled")
+        close_button = ctk.CTkButton(
+            dialog,
+            text="Close",
+            width=100,
+            height=34,
+            fg_color=Theme.PRIMARY,
+            hover_color=Theme.PRIMARY_HOVER,
+            command=dialog.destroy,
+        )
+        close_button.grid(
+            row=3,
+            column=0,
+            sticky="e",
+            padx=30,
+            pady=(16, 24),
+        )
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        close_button.focus_set()
 
     def _log_source_diagnostic(self, diagnostic, item_name=None):
         label = item_name or diagnostic.get("Source", "Store source")
@@ -6092,11 +6304,17 @@ Fixes "needs to be online" and similar errors.
 
         target_arch = self._target_arch()
         prefer_exact = self._has_arch_override()
+        store_query = self._store_query_settings()
         self.keep_updated_running = True
         self._update_status("Checking installed Store apps...", Theme.INFO)
         threading.Thread(
             target=self._keep_updated_worker,
-            args=(scheduled, target_arch, prefer_exact),
+            args=(
+                scheduled,
+                target_arch,
+                prefer_exact,
+                store_query,
+            ),
             daemon=True,
         ).start()
 
@@ -6105,24 +6323,106 @@ Fixes "needs to be online" and similar errors.
         if self.keep_updated_var.get():
             self._schedule_keep_updated_scan()
 
-    def _keep_updated_worker(self, scheduled=False, target_arch=SYSTEM_ARCH, prefer_exact=False):
+    def _keep_updated_worker(
+        self,
+        scheduled=False,
+        target_arch=SYSTEM_ARCH,
+        prefer_exact=False,
+        store_query=None,
+    ):
         try:
-            installed_versions = StoreAPI.get_installed_appx_versions()
-            if not installed_versions:
+            _report, blocker = self._windows_workflow_preflight(
+                {"rg-adguard"}
+            )
+            if blocker:
+                self._post_windows_blocker(
+                    "Keep updated",
+                    blocker,
+                    status="preflight-blocked",
+                    show_dialog=not scheduled,
+                )
+                return
+
+            inventory = StoreAPI.get_installed_appx_versions()
+            if not inventory_is_known(inventory):
+                self._post_inventory_failure(
+                    "Keep updated",
+                    inventory,
+                    show_dialog=not scheduled,
+                )
+                return
+            installed_versions = inventory.get("Versions") or {}
+            if inventory.get("Status") == "empty":
                 self.after(0, lambda: self._update_status("No installed Store apps found", Theme.WARNING))
-                self.after(0, lambda: self._log("WARNING", "Keep updated scan found no installed AppX/MSIX packages"))
+                self.after(
+                    0,
+                    lambda text=inventory_failure_text(inventory): self._log(
+                        "WARNING",
+                        text,
+                    ),
+                )
                 return
 
             self.after(0, lambda c=len(installed_versions): self._log("INFO", f"Checking {c} installed AppX/MSIX identities against the catalog"))
+            lookup_failures = []
+
+            def package_lookup(app):
+                diagnostic = StoreAPI.get_packages_with_diagnostics(
+                    app["ProductId"],
+                    (store_query or {}).get("Ring"),
+                    (store_query or {}).get("Language"),
+                    (store_query or {}).get("Market"),
+                )
+                self._log_source_diagnostic(
+                    diagnostic,
+                    app.get("Name"),
+                )
+                if (
+                    diagnostic.get("Errors")
+                    and not diagnostic.get("Packages")
+                ):
+                    lookup_failures.append({
+                        "Name": app.get("Name", "app"),
+                        "Errors": list(
+                            diagnostic.get("Errors") or []
+                        ),
+                    })
+                return diagnostic.get("Packages") or []
+
             update_packages = StoreAPI.select_catalog_update_packages(
                 APP_CATALOG,
                 installed_versions,
-                self._get_packages_with_logging,
+                package_lookup,
                 target_arch,
                 prefer_exact,
             )
             self.user_profile["KeepUpdatedLastScan"] = datetime.now(timezone.utc).isoformat()
             self._save_user_profile()
+
+            if not update_packages and lookup_failures:
+                failed_names = ", ".join(
+                    item["Name"] for item in lookup_failures[:5]
+                )
+                self.after(
+                    0,
+                    lambda: self._update_status(
+                        "Keep updated source check incomplete",
+                        Theme.DANGER,
+                    ),
+                )
+                self.after(
+                    0,
+                    lambda names=failed_names: self._log(
+                        "ERROR",
+                        (
+                            "Update state is unknown because package "
+                            f"lookup failed for: {names}. No packages "
+                            "were queued and the machine was not "
+                            "reported current."
+                        ),
+                    ),
+                )
+                return
 
             if not update_packages:
                 self.after(0, lambda: self._update_status("Installed catalog apps are current", Theme.SUCCESS))
@@ -6136,6 +6436,18 @@ Fixes "needs to be online" and similar errors.
                 self.after(0, self._update_queue_ui)
                 self.after(0, lambda c=queued_count: self._update_status(f"Queued {c} update package(s)", Theme.SUCCESS))
                 self.after(0, lambda c=queued_count, names=label: self._log("SUCCESS", f"Keep updated queued {c} package(s): {names}"))
+                if lookup_failures:
+                    self.after(
+                        0,
+                        lambda count=len(lookup_failures): self._log(
+                            "WARNING",
+                            (
+                                f"{count} catalog lookup(s) failed; "
+                                "only verified update results were "
+                                "queued."
+                            ),
+                        ),
+                    )
             else:
                 self.after(0, lambda: self._update_status("Updates already queued", Theme.INFO))
                 self.after(0, lambda: self._log("INFO", "Keep updated found packages already present in the queue"))
@@ -6246,7 +6558,23 @@ Fixes "needs to be online" and similar errors.
 
     def _scan_ltsc_gaps_worker(self, target_arch, prefer_exact):
         try:
-            missing_apps = StoreAPI.detect_missing_ltsc_components()
+            _report, blocker = self._windows_workflow_preflight(
+                {"rg-adguard"}
+            )
+            if blocker:
+                self._post_windows_blocker(
+                    "LTSC scan",
+                    blocker,
+                    status="preflight-blocked",
+                )
+                return
+            inventory = StoreAPI.get_installed_appx_identities()
+            if not inventory_is_known(inventory):
+                self._post_inventory_failure("LTSC scan", inventory)
+                return
+            missing_apps = StoreAPI.detect_missing_ltsc_components(
+                inventory
+            )
         except Exception as exc:
             self.after(0, lambda: self._update_status("❌ LTSC scan failed", Theme.DANGER))
             self.after(0, lambda e=str(exc): self._log("ERROR", f"LTSC component scan failed: {e}"))
@@ -6747,6 +7075,7 @@ Fixes "needs to be online" and similar errors.
                 self.source_health,
                 self.download_queue,
                 self._current_log_text(),
+                self.capability_report,
             )
         except (DiagnosticRedactionError, OSError, ValueError) as exc:
             self._update_status(
@@ -7427,7 +7756,32 @@ Fixes "needs to be online" and similar errors.
     ):
         identity_set = {identity.lower() for identity in identities if identity}
         context.progress(0.05, "Inspecting installed and cached package versions")
-        installed_versions = StoreAPI.get_installed_appx_versions()
+        _report, blocker = self._windows_workflow_preflight(
+            required_services={
+                "AppXSvc",
+                "ClipSVC",
+                "LicenseManager",
+            },
+        )
+        if blocker:
+            context.failed("windows-preflight", blocker)
+            self._post_windows_blocker(
+                "Rollback",
+                blocker,
+                status="preflight-blocked",
+            )
+            return
+        inventory = StoreAPI.get_installed_appx_versions()
+        if not inventory_is_known(inventory):
+            message = inventory_failure_text(inventory)
+            context.failed(
+                "installed-inventory",
+                message,
+                InventoryStatus=inventory.get("Status"),
+            )
+            self._post_inventory_failure("Rollback", inventory)
+            return
+        installed_versions = inventory.get("Versions") or {}
         current_versions = {}
         for package in packages:
             if not package.get("FileName") or is_dependency_package(package):
@@ -7435,15 +7789,35 @@ Fixes "needs to be online" and similar errors.
             identity = (package.get("PackageIdentity") or package_identity(package["FileName"])).lower()
             if identity not in identity_set:
                 continue
-            current_versions[identity] = (
-                installed_versions.get(identity)
-                or package.get("AvailableVersion")
-                or format_version_tuple(package_version_tuple(package["FileName"]))
+            installed_version = installed_versions.get(identity)
+            if not installed_version:
+                self._post_ui(
+                    lambda name=identity: self._log(
+                        "WARNING",
+                        (
+                            f"Rollback skipped {name}: the verified "
+                            "current-user inventory reports it is not "
+                            "installed."
+                        ),
+                    )
+                )
+                continue
+            current_versions[identity] = installed_version
+
+        if not current_versions:
+            message = (
+                "No queued app identity is present in the verified "
+                "current-user inventory; rollback was not started."
             )
+            context.failed("rollback-plan", message)
+            self._post_ui(
+                lambda text=message: self._log("WARNING", text)
+            )
+            return
 
         candidates = StoreAPI.rollback_candidates(
             cache_folders,
-            identity_set,
+            set(current_versions),
             current_versions,
             target_arch=target_arch,
             store_query=store_query,
@@ -7495,7 +7869,17 @@ Fixes "needs to be online" and similar errors.
     
     def _start_install(self):
         if not IS_ADMIN:
-            self._update_status("⚠️ Administrator required", Theme.WARNING)
+            self._update_status(
+                "Administrator required — reopen elevated",
+                Theme.WARNING,
+            )
+            self._log(
+                "WARNING",
+                (
+                    "Installation was not started. Next action: "
+                    "reopen MSStoreHelper as Administrator and retry."
+                ),
+            )
             return
         
         to_install = [p for p in self.download_queue if p.get('LocalPath') and os.path.exists(p.get('LocalPath', ''))]
@@ -7538,6 +7922,31 @@ Fixes "needs to be online" and similar errors.
                 "Dependencies are installed before application packages.",
             )
         )
+        _report, blocker = self._windows_workflow_preflight(
+            required_services={
+                "AppXSvc",
+                "ClipSVC",
+                "LicenseManager",
+            },
+        )
+        if blocker:
+            context.failed("windows-preflight", blocker)
+            self._post_windows_blocker(
+                "Install",
+                blocker,
+                status="preflight-blocked",
+            )
+            return
+        inventory = StoreAPI.get_installed_appx_versions()
+        if not inventory_is_known(inventory):
+            message = inventory_failure_text(inventory)
+            context.failed(
+                "installed-inventory",
+                message,
+                InventoryStatus=inventory.get("Status"),
+            )
+            self._post_inventory_failure("Install", inventory)
+            return
         total = len(packages)
         
         for i, pkg in enumerate(packages):
@@ -7583,7 +7992,12 @@ Fixes "needs to be online" and similar errors.
                 )
             )
 
-            should_skip, installed_version, package_name = StoreAPI.should_skip_installed_package(pkg)
+            should_skip, installed_version, package_name = (
+                StoreAPI.should_skip_installed_package(
+                    pkg,
+                    inventory,
+                )
+            )
             if should_skip:
                 context.skipped(
                     fname,
@@ -8438,7 +8852,13 @@ def _cli_download_selected(packages, output_path, stderr, context=None):
     return downloaded, records
 
 
-def _cli_install_downloaded(packages, records, stderr, context=None):
+def _cli_install_downloaded(
+    packages,
+    records,
+    stderr,
+    context=None,
+    inventory=None,
+):
     success_count = 0
     skipped_count = 0
     failed_count = 0
@@ -8469,7 +8889,12 @@ def _cli_install_downloaded(packages, records, stderr, context=None):
                 )
             continue
 
-        should_skip, installed_version, package_name = StoreAPI.should_skip_installed_package(package)
+        should_skip, installed_version, package_name = (
+            StoreAPI.should_skip_installed_package(
+                package,
+                inventory,
+            )
+        )
         if should_skip:
             skipped_count += 1
             _cli_set_package_record(records, package, "skipped", f"installed {installed_version} is current", local_path)
@@ -8553,10 +8978,68 @@ def _cli_package_workflow(args, stdout, stderr):
         "Errors": errors,
         "Packages": [],
     }
+    install_inventory = None
+    preflight_blocker = ""
+    if args.install:
+        package_source_health = [{
+            "Key": "rg-adguard",
+            "Available": bool(
+                diagnostic.get("Packages")
+                and not diagnostic.get("Errors")
+            ),
+            "Detail": (
+                "Package lookup completed"
+                if diagnostic.get("Packages")
+                else "; ".join(diagnostic.get("Errors") or [])
+            ),
+        }]
+        capability_report = StoreAPI.get_windows_capability_report(
+            package_source_health
+        )
+        summary["WindowsCapability"] = capability_report
+        preflight_blocker = capability_blocking_text(
+            capability_report,
+            required_sources={"rg-adguard"},
+            required_services={
+                "AppXSvc",
+                "ClipSVC",
+                "LicenseManager",
+            },
+        )
+        install_inventory = StoreAPI.get_installed_appx_versions()
+        summary["InstalledInventory"] = install_inventory
 
     workflow = {}
 
     def run_package_operation(context):
+        if args.install and preflight_blocker:
+            _cli_print(
+                f"error: {preflight_blocker}",
+                stderr,
+            )
+            context.failed(
+                "windows-preflight",
+                preflight_blocker,
+            )
+            return context.result.inferred_terminal_state()
+        if args.install and not inventory_is_known(install_inventory):
+            message = inventory_failure_text(install_inventory)
+            _cli_print(f"error: {message}", stderr)
+            context.failed(
+                "installed-inventory",
+                message,
+                InventoryStatus=install_inventory.get("Status"),
+            )
+            return context.result.inferred_terminal_state()
+        if args.install and not IS_ADMIN:
+            message = (
+                "Administrator rights are required for --install. "
+                "Next action: reopen the terminal as Administrator "
+                "and retry; no package was downloaded or installed."
+            )
+            _cli_print(f"error: {message}", stderr)
+            context.failed("privilege", message)
+            return context.result.inferred_terminal_state()
         downloaded, records = _cli_download_selected(
             selected,
             output_path,
@@ -8569,16 +9052,12 @@ def _cli_package_workflow(args, stdout, stderr):
             return context.result.inferred_terminal_state()
         if not args.install:
             return context.result.inferred_terminal_state()
-        if not IS_ADMIN:
-            message = "Administrator rights are required for --install"
-            _cli_print(f"error: {message.lower()}", stderr)
-            context.failed("privilege", message)
-            return context.result.inferred_terminal_state()
         installed, skipped, failed = _cli_install_downloaded(
             downloaded,
             records,
             stderr,
             context,
+            install_inventory,
         )
         workflow["Installed"] = installed
         workflow["Skipped"] = skipped
