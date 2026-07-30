@@ -43,11 +43,11 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - **Accessibility Guardrails** - Keeps core theme contrast and the welcome surface usable at 100, 125, and 150 percent scaling
 - 📥 **Download Queue** - Queue multiple packages with progress tracking
 - 📦 **Install Packages** - Install downloaded apps directly (requires Admin)
-- 🔧 **Store Repair** - Built-in repair preset for Store cache, TokenBroker, licensing, and connectivity issues
-- **Repair Rollback** - Repair, provisioning, licensing, and cache actions write backup manifests and restore scripts
-- 👥 **Provisioning Repair** - Clears Store deprovision tombstones and re-registers Store apps for new profiles
-- 🔐 **Licensing Reset** - Restarts ClipSVC/LicenseManager and refreshes Store purchase licensing
-- 🧹 **Cache Rebuild** - Scans, backs up, and recreates Store cache folders offline
+- 🔧 **Inspected Store Repair** - Shows the exact preconditions, backups, mutations, permissions, and reboot impact before Store, provisioning, licensing, or cache work can run
+- **Verified Repair Restore** - Uses exclusive transactions, restrictive backup ACLs, hash-verified copies, safe-checkpoint cancellation, and repeatable in-app restore without consuming the backup
+- 👥 **Provisioning Repair** - Backs up AppX deprovisioning state before clearing Store tombstones and re-registering existing packages
+- 🔐 **Licensing Reset** - Backs up ClipSVC state before verified service and package recovery
+- 🧹 **Cache Rebuild** - Backs up and verifies Store cache folders before recreating them
 - 🗂️ **Shared Offline Cache** - Mirrors downloaded AppX/MSIX artifacts to a shared folder for air-gapped reuse
 - **Local HTTP Mirror** - Serves a downloaded AppX/MSIX cache and JSON package index to nearby clinic PCs
 - 🧾 **DISM Provisioning Export** - Generates fleet-ready PowerShell scripts that call DISM for queued packages
@@ -182,10 +182,11 @@ python MSStoreHelper.py --mirror C:\MSStoreMirror --host 0.0.0.0 --port 8765 --j
 
 If you see errors like "The server stumbled" or "needs to be online":
 
-1. Click **"🔧 Repair Store"** in the sidebar
-2. Watch the console for cache, token, and licensing repair results
-3. Use the logged backup folder and `restore.ps1` if a repair needs to be rolled back
-4. Restart your PC if the console recommends it
+1. Scroll to **Admin Tools** and choose an **Inspect** action
+2. Review the exact plan, impact, permissions, reboot guidance, backup targets, commands, and postconditions
+3. Choose how many verified backups to retain, acknowledge the inspected plan, and select **Run Verified Repair**
+4. Use **Cancel at Safe Checkpoint** to stop between mutation steps; the active step is never interrupted mid-change
+5. Choose **Restore Backup** to inspect and run a hash-verified restore. Restore verifies files, registry state, services, and package identities while keeping the source backup reusable
 
 ---
 
@@ -239,6 +240,7 @@ MSStoreHelper/
 ├── msstore_package_resolution.py  # Package selection and install ordering
 ├── package_ingress.py             # Package filename, URL, and path boundary
 ├── package_trust.py               # Signature, manifest, identity, and promotion policy
+├── repair_transaction.py          # Fail-closed repair, backup, and restore engine
 ├── pyproject.toml                 # Python package metadata
 ├── requirements.txt               # Pinned runtime dependencies
 ├── tests/

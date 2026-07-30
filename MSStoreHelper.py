@@ -66,6 +66,18 @@ from package_trust import (
     review_trust_report,
     trust_report_allows_automation,
 )
+from repair_transaction import (
+    DEFAULT_REPAIR_RETENTION,
+    RepairTransactionError,
+    build_repair_plan,
+    build_restore_plan,
+    execute_repair_plan,
+    execute_restore_plan,
+    list_repair_backups,
+    normalize_retention,
+    render_repair_plan,
+    render_restore_plan,
+)
 from store_sources import (
     StoreSourceError,
     detect_source_health,
@@ -482,6 +494,7 @@ class StoreAPI:
             "StoreMarket": "US",
             "KeepUpdatedEnabled": False,
             "KeepUpdatedLastScan": "",
+            "RepairRetentionCount": DEFAULT_REPAIR_RETENTION,
         }
 
     @staticmethod
@@ -671,6 +684,12 @@ class StoreAPI:
             profile["StoreMarket"] = StoreAPI.normalize_store_market(data.get("StoreMarket", "US"))
             profile["KeepUpdatedEnabled"] = bool(data.get("KeepUpdatedEnabled", False))
             profile["KeepUpdatedLastScan"] = str(data.get("KeepUpdatedLastScan", "") or "")
+            profile["RepairRetentionCount"] = normalize_retention(
+                data.get(
+                    "RepairRetentionCount",
+                    DEFAULT_REPAIR_RETENTION,
+                )
+            )
             return profile
         except Exception:
             return StoreAPI.default_user_profile()
@@ -3346,6 +3365,10 @@ function Backup-MSStoreHelperRegistryPath {{
 
     @staticmethod
     def _run_powershell_steps(steps, log_callback=None, progress_callback=None, timeout=90, repair_name=None, backup_root=None):
+        raise RepairTransactionError(
+            "Legacy best-effort repair execution is disabled; "
+            "inspect and explicitly confirm a repair transaction instead"
+        )
         context = StoreAPI.create_repair_context(repair_name or "repair", backup_root) if repair_name else None
         if context:
             context["Steps"] = [
@@ -3636,6 +3659,16 @@ class MSStoreHelperApp(ctk.CTk):
         self.shared_cache_path = os.path.join(DEFAULT_OUTPUT, "SharedCache")
         self.keep_updated_after_id = None
         self.keep_updated_running = False
+        self.repair_retention_var = ctk.StringVar(
+            value=str(
+                normalize_retention(
+                    self.user_profile.get("RepairRetentionCount")
+                )
+            )
+        )
+        self._repair_operation_active = False
+        self._repair_cancel_event = None
+        self._repair_buttons = []
         
         self._build_ui()
         if self.download_queue:
@@ -3911,10 +3944,25 @@ class MSStoreHelperApp(ctk.CTk):
         repair_frame = ctk.CTkFrame(nav, fg_color="transparent")
         repair_frame.pack(fill="x", padx=4, pady=(0, 8))
         ctk.CTkLabel(repair_frame, text="ADMIN TOOLS", font=("Segoe UI Semibold", 10), text_color=Theme.TEXT_MUTED, anchor="w").pack(fill="x", pady=(0, 6))
-        ctk.CTkButton(repair_frame, text="Repair Store", height=34, font=("Segoe UI Semibold", 11), fg_color=Theme.DANGER, hover_color=Theme.DANGER_HOVER, command=self._run_repair).pack(fill="x", pady=(0, 5))
-        ctk.CTkButton(repair_frame, text="Provision Store", height=32, font=("Segoe UI", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._run_provisioning_repair).pack(fill="x", pady=(0, 5))
-        ctk.CTkButton(repair_frame, text="Reset Licensing", height=32, font=("Segoe UI", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._run_licensing_reset).pack(fill="x", pady=(0, 5))
-        ctk.CTkButton(repair_frame, text="Rebuild Cache", height=32, font=("Segoe UI", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._run_cache_rebuild).pack(fill="x")
+        repair_store_button = ctk.CTkButton(repair_frame, text="Inspect Store Repair", height=34, font=("Segoe UI Semibold", 11), fg_color=Theme.DANGER, hover_color=Theme.DANGER_HOVER, command=self._run_repair)
+        repair_store_button.pack(fill="x", pady=(0, 5))
+        provision_button = ctk.CTkButton(repair_frame, text="Inspect Provisioning", height=32, font=("Segoe UI", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._run_provisioning_repair)
+        provision_button.pack(fill="x", pady=(0, 5))
+        licensing_button = ctk.CTkButton(repair_frame, text="Inspect Licensing Reset", height=32, font=("Segoe UI", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._run_licensing_reset)
+        licensing_button.pack(fill="x", pady=(0, 5))
+        cache_button = ctk.CTkButton(repair_frame, text="Inspect Cache Rebuild", height=32, font=("Segoe UI", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._run_cache_rebuild)
+        cache_button.pack(fill="x", pady=(0, 5))
+        restore_button = ctk.CTkButton(repair_frame, text="Restore Backup", height=32, font=("Segoe UI", 11), fg_color="transparent", text_color=Theme.TEXT_PRIMARY, border_width=1, border_color=Theme.BORDER, hover_color=Theme.BG_CARD_HOVER, command=self._choose_repair_restore)
+        restore_button.pack(fill="x", pady=(0, 5))
+        self.repair_cancel_button = ctk.CTkButton(repair_frame, text="Cancel at Safe Checkpoint", height=32, font=("Segoe UI", 10), fg_color="transparent", text_color=Theme.TEXT_MUTED, border_width=1, border_color=Theme.BORDER_SUBTLE, hover_color=Theme.BG_CARD_HOVER, state="disabled", command=self._cancel_repair_operation)
+        self.repair_cancel_button.pack(fill="x")
+        self._repair_buttons = [
+            repair_store_button,
+            provision_button,
+            licensing_button,
+            cache_button,
+            restore_button,
+        ]
     
     def _build_queue_panel(self):
         self.right_panel.grid_rowconfigure(1, weight=1)
@@ -6109,36 +6157,488 @@ Fixes "needs to be online" and similar errors.
             self.after(0, lambda: self._log("INFO", "  3. Try a different package version (older/newer)"))
     
     def _run_repair(self):
-        if not IS_ADMIN:
-            self._update_status("⚠️ Administrator required", Theme.WARNING)
-            return
-
-        self._update_status("🔧 Repairing Store...", Theme.INFO)
-        self._log("INFO", "Store repair preset started")
-        threading.Thread(target=self._repair_worker, daemon=True).start()
+        self._inspect_repair_plan("store-repair")
 
     def _run_provisioning_repair(self):
-        if not IS_ADMIN:
-            self._update_status("⚠️ Administrator required", Theme.WARNING)
-            return
-
-        self._update_status("👥 Repairing Store provisioning...", Theme.INFO)
-        self._log("INFO", "Store provisioning repair started")
-        threading.Thread(target=self._provisioning_repair_worker, daemon=True).start()
+        self._inspect_repair_plan("provisioning-repair")
 
     def _run_licensing_reset(self):
-        if not IS_ADMIN:
-            self._update_status("⚠️ Administrator required", Theme.WARNING)
-            return
-
-        self._update_status("🔐 Resetting Store licensing...", Theme.INFO)
-        self._log("INFO", "Store licensing reset started")
-        threading.Thread(target=self._licensing_reset_worker, daemon=True).start()
+        self._inspect_repair_plan("licensing-reset")
 
     def _run_cache_rebuild(self):
-        self._update_status("🧹 Rebuilding Store cache...", Theme.INFO)
-        self._log("INFO", "Store cache scan and offline rebuild started")
-        threading.Thread(target=self._cache_rebuild_worker, daemon=True).start()
+        self._inspect_repair_plan("cache-rebuild")
+
+    def _inspect_repair_plan(self, repair_type):
+        if self._repair_operation_active:
+            self._update_status(
+                "A repair or restore is already running",
+                Theme.WARNING,
+            )
+            return
+        try:
+            plan = build_repair_plan(
+                repair_type,
+                backup_base=REPAIR_BACKUP_DIR,
+                retention_count=self.repair_retention_var.get(),
+            )
+        except RepairTransactionError as exc:
+            self._update_status("Repair plan unavailable", Theme.DANGER)
+            self._log("ERROR", f"Repair plan unavailable: {exc}")
+            return
+        self._show_repair_plan_dialog(plan, restore=False)
+
+    def _show_repair_plan_dialog(self, plan, *, restore):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(
+            "Inspect restore plan" if restore else "Inspect repair plan"
+        )
+        dialog.geometry("780x680")
+        dialog.minsize(620, 500)
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(0, weight=1)
+
+        content = ctk.CTkFrame(dialog, fg_color="transparent")
+        content.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=22,
+            pady=20,
+        )
+        content.grid_columnconfigure(0, weight=1)
+        content.grid_rowconfigure(2, weight=1)
+
+        title = (
+            "Restore captured Windows state"
+            if restore
+            else plan["DisplayName"]
+        )
+        ctk.CTkLabel(
+            content,
+            text=title,
+            font=("Segoe UI Semibold", 20),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew")
+        summary = (
+            "Review the exact targets and verification contract. "
+            "The backup remains available after restore."
+            if restore
+            else (
+                "Nothing has run. Review every precondition, backup, "
+                "mutation, permission, and reboot impact first."
+            )
+        )
+        ctk.CTkLabel(
+            content,
+            text=summary,
+            font=("Segoe UI", 11),
+            text_color=Theme.TEXT_MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=540,
+        ).grid(row=1, column=0, sticky="ew", pady=(3, 12))
+
+        plan_box = ctk.CTkTextbox(
+            content,
+            font=("Consolas", 10),
+            fg_color=Theme.BG_INPUT,
+            text_color=Theme.TEXT_SECONDARY,
+            wrap="word",
+        )
+        plan_box.grid(row=2, column=0, sticky="nsew")
+
+        def render_plan_text():
+            text = (
+                render_restore_plan(plan)
+                if restore
+                else render_repair_plan(plan)
+            )
+            plan_box.configure(state="normal")
+            plan_box.delete("1.0", "end")
+            plan_box.insert("1.0", text)
+            plan_box.configure(state="disabled")
+
+        render_plan_text()
+        controls = ctk.CTkFrame(content, fg_color="transparent")
+        controls.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        controls.grid_columnconfigure(0, weight=1)
+
+        if not restore:
+            retention_row = ctk.CTkFrame(
+                controls,
+                fg_color="transparent",
+            )
+            retention_row.grid(row=0, column=0, sticky="ew")
+            ctk.CTkLabel(
+                retention_row,
+                text="Keep verified backups",
+                font=("Segoe UI", 11),
+                text_color=Theme.TEXT_SECONDARY,
+            ).pack(side="left")
+
+            def change_retention(value):
+                plan["RetentionCount"] = normalize_retention(value)
+                self.repair_retention_var.set(
+                    str(plan["RetentionCount"])
+                )
+                render_plan_text()
+
+            ctk.CTkOptionMenu(
+                retention_row,
+                values=["1", "3", "5", "10", "20", "50"],
+                variable=self.repair_retention_var,
+                width=72,
+                height=28,
+                command=change_retention,
+            ).pack(side="right")
+
+        accepted = ctk.BooleanVar(value=False)
+        acknowledgement = ctk.CTkCheckBox(
+            controls,
+            text=(
+                "I reviewed this exact plan and accept the Windows changes."
+            ),
+            variable=accepted,
+            font=("Segoe UI", 11),
+            fg_color=Theme.PRIMARY,
+            hover_color=Theme.PRIMARY_HOVER,
+        )
+        acknowledgement.grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(10, 8),
+        )
+
+        actions = ctk.CTkFrame(controls, fg_color="transparent")
+        actions.grid(row=2, column=0, sticky="ew")
+        actions.grid_columnconfigure(0, weight=1)
+        ctk.CTkButton(
+            actions,
+            text="Close",
+            width=92,
+            height=34,
+            fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=dialog.destroy,
+        ).grid(row=0, column=1, padx=(0, 8))
+        confirm_button = ctk.CTkButton(
+            actions,
+            text="Run Verified Restore" if restore else "Run Verified Repair",
+            width=156,
+            height=34,
+            fg_color=Theme.DANGER,
+            hover_color=Theme.DANGER_HOVER,
+            state="disabled",
+        )
+        confirm_button.grid(row=0, column=2)
+
+        def update_confirmation_state():
+            confirm_button.configure(
+                state="normal" if accepted.get() else "disabled"
+            )
+
+        acknowledgement.configure(command=update_confirmation_state)
+
+        def confirm():
+            if not accepted.get():
+                return
+            if plan["RequiresAdmin"] and not IS_ADMIN:
+                self._update_status(
+                    "Administrator access is required",
+                    Theme.WARNING,
+                )
+                self._log(
+                    "WARNING",
+                    "Restart MSStoreHelper as Administrator to run this plan.",
+                )
+                dialog.destroy()
+                return
+            if not restore:
+                self.user_profile["RepairRetentionCount"] = (
+                    plan["RetentionCount"]
+                )
+                self._save_user_profile()
+            dialog.destroy()
+            self._start_repair_transaction(plan, restore=restore)
+
+        confirm_button.configure(command=confirm)
+        dialog.after(50, dialog.focus_force)
+
+    def _choose_repair_restore(self):
+        if self._repair_operation_active:
+            self._update_status(
+                "A repair or restore is already running",
+                Theme.WARNING,
+            )
+            return
+        backups = list_repair_backups(REPAIR_BACKUP_DIR)
+        if not backups:
+            self._update_status(
+                "No verified repair backups are available",
+                Theme.WARNING,
+            )
+            self._log(
+                "INFO",
+                f"No restorable transactions found in {REPAIR_BACKUP_DIR}",
+            )
+            return
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Choose repair backup")
+        dialog.geometry("700x520")
+        dialog.minsize(620, 460)
+        dialog.transient(self)
+        dialog.grab_set()
+        content = ctk.CTkFrame(dialog, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=22, pady=20)
+        ctk.CTkLabel(
+            content,
+            text="Choose a verified repair backup",
+            font=("Segoe UI Semibold", 20),
+            anchor="w",
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            content,
+            text=(
+                "Selecting a backup opens its exact restore plan. "
+                "No state changes occur from this screen."
+            ),
+            font=("Segoe UI", 11),
+            text_color=Theme.TEXT_MUTED,
+            anchor="w",
+        ).pack(fill="x", pady=(3, 12))
+        backup_list = ctk.CTkScrollableFrame(
+            content,
+            fg_color=Theme.BG_INPUT,
+            border_width=1,
+            border_color=Theme.BORDER_SUBTLE,
+        )
+        backup_list.pack(fill="both", expand=True)
+
+        def select_backup(root):
+            dialog.destroy()
+            self._prepare_repair_restore(root)
+
+        for backup in backups:
+            completed = str(backup.get("CompletedAt") or "Unknown date")
+            operation = str(backup.get("OperationId") or "")[:8]
+            label = (
+                f"{backup['RepairName']}\n"
+                f"{completed}  •  {backup['Outcome']}  •  {operation}"
+            )
+            ctk.CTkButton(
+                backup_list,
+                text=label,
+                height=54,
+                font=("Segoe UI", 11),
+                anchor="w",
+                fg_color=Theme.BG_CARD,
+                text_color=Theme.TEXT_PRIMARY,
+                hover_color=Theme.BG_CARD_HOVER,
+                border_width=1,
+                border_color=Theme.BORDER_SUBTLE,
+                command=lambda root=backup["BackupRoot"]: (
+                    select_backup(root)
+                ),
+            ).pack(fill="x", padx=6, pady=4)
+
+        actions = ctk.CTkFrame(content, fg_color="transparent")
+        actions.pack(fill="x", pady=(10, 0))
+
+        def browse_backup():
+            root = filedialog.askdirectory(
+                parent=dialog,
+                initialdir=REPAIR_BACKUP_DIR,
+                title="Choose an MSStoreHelper repair backup",
+            )
+            if root:
+                select_backup(root)
+
+        ctk.CTkButton(
+            actions,
+            text="Browse another folder",
+            width=150,
+            height=32,
+            fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=browse_backup,
+        ).pack(side="left")
+        ctk.CTkButton(
+            actions,
+            text="Close",
+            width=88,
+            height=32,
+            fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
+            border_width=1,
+            border_color=Theme.BORDER,
+            hover_color=Theme.BG_CARD_HOVER,
+            command=dialog.destroy,
+        ).pack(side="right")
+
+    def _prepare_repair_restore(self, backup_root):
+        try:
+            plan = build_restore_plan(
+                backup_root,
+                backup_base=REPAIR_BACKUP_DIR,
+            )
+        except RepairTransactionError as exc:
+            self._update_status("Backup cannot be restored", Theme.DANGER)
+            self._log("ERROR", f"Backup cannot be restored: {exc}")
+            return
+        self._show_repair_plan_dialog(plan, restore=True)
+
+    def _set_repair_controls_running(self, running):
+        self._repair_operation_active = running
+        for button in self._repair_buttons:
+            button.configure(state="disabled" if running else "normal")
+        self.repair_cancel_button.configure(
+            state="normal" if running else "disabled",
+            text_color=Theme.WARNING if running else Theme.TEXT_MUTED,
+            border_color=Theme.WARNING if running else Theme.BORDER_SUBTLE,
+        )
+
+    def _start_repair_transaction(self, plan, *, restore):
+        if self._repair_operation_active:
+            return
+        self._repair_cancel_event = threading.Event()
+        self._set_repair_controls_running(True)
+        action = "restore" if restore else "repair"
+        self._update_status(
+            f"Running verified {action} transaction…",
+            Theme.INFO,
+        )
+        self._log(
+            "INFO",
+            (
+                f"{plan['DisplayName']} started "
+                f"(operation {plan['OperationId']})"
+            ),
+        )
+        threading.Thread(
+            target=self._repair_transaction_worker,
+            args=(plan, restore),
+            daemon=True,
+        ).start()
+
+    def _cancel_repair_operation(self):
+        if not self._repair_operation_active or not self._repair_cancel_event:
+            return
+        self._repair_cancel_event.set()
+        self.repair_cancel_button.configure(state="disabled")
+        self._update_status(
+            "Cancellation requested; waiting for a safe checkpoint…",
+            Theme.WARNING,
+        )
+        self._log(
+            "WARNING",
+            "Cancellation requested; the active step will finish first.",
+        )
+
+    def _repair_transaction_worker(self, plan, restore):
+        def log_callback(message):
+            self.after(
+                0,
+                lambda value=message: self._log("INFO", value),
+            )
+
+        def progress_callback(value):
+            self.after(
+                0,
+                lambda progress=value: self._update_progress(progress),
+            )
+
+        try:
+            if restore:
+                context = execute_restore_plan(
+                    plan,
+                    confirmation_token=plan["ConfirmationToken"],
+                    powershell_exe=POWERSHELL_EXE,
+                    is_admin=IS_ADMIN,
+                    cancel_event=self._repair_cancel_event,
+                    log_callback=log_callback,
+                    progress_callback=progress_callback,
+                )
+            else:
+                context = execute_repair_plan(
+                    plan,
+                    confirmation_token=plan["ConfirmationToken"],
+                    powershell_exe=POWERSHELL_EXE,
+                    is_admin=IS_ADMIN,
+                    cancel_event=self._repair_cancel_event,
+                    log_callback=log_callback,
+                    progress_callback=progress_callback,
+                )
+        except Exception as exc:
+            context = {
+                "Outcome": "failed",
+                "Results": [{
+                    "Description": "Transaction setup",
+                    "Success": False,
+                    "Stderr": str(exc),
+                }],
+            }
+        self.after(
+            0,
+            lambda value=context, is_restore=restore: (
+                self._finish_repair_transaction(value, is_restore)
+            ),
+        )
+
+    def _finish_repair_transaction(self, context, restore):
+        self._update_progress(0)
+        self._set_repair_controls_running(False)
+        self._repair_cancel_event = None
+        outcome = context.get("Outcome", "failed")
+        action = "Restore" if restore else "Repair"
+        backup_root = context.get("BackupRoot")
+        if backup_root:
+            self._log("INFO", f"Verified backup: {backup_root}")
+        for result in context.get("Results", []):
+            if result.get("Success"):
+                continue
+            description = result.get("Description", "Transaction step")
+            detail = result.get("Stderr") or result.get("Stdout") or ""
+            self._log("ERROR", f"{description}: {detail}")
+        if outcome == "succeeded":
+            self._update_status(
+                f"{action} transaction verified",
+                Theme.SUCCESS,
+            )
+            self._log(
+                "SUCCESS",
+                f"{action} completed with all postconditions verified.",
+            )
+        elif outcome.startswith("cancelled"):
+            self._update_status(
+                f"{action} stopped at a safe checkpoint",
+                Theme.WARNING,
+            )
+            self._log(
+                "WARNING",
+                f"{action} outcome: {outcome}",
+            )
+        else:
+            self._update_status(
+                f"{action} stopped: {outcome}",
+                Theme.DANGER,
+            )
+            self._log(
+                "ERROR",
+                (
+                    f"{action} stopped fail-closed ({outcome}). "
+                    "Use Restore Backup if mutation began."
+                ),
+            )
 
     def _log_repair_results(self, title, results):
         success_count = sum(1 for result in results if result.get("Success"))

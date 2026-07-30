@@ -50,6 +50,7 @@ class UserProfileTests(unittest.TestCase):
             profile["StoreMarket"] = "DE"
             profile["KeepUpdatedEnabled"] = True
             profile["KeepUpdatedLastScan"] = "2026-06-29T12:00:00+00:00"
+            profile["RepairRetentionCount"] = 20
 
             StoreAPI.save_user_profile(profile, profile_path)
             loaded = StoreAPI.load_user_profile(profile_path)
@@ -59,6 +60,7 @@ class UserProfileTests(unittest.TestCase):
             self.assertEqual(loaded["StoreMarket"], "DE")
             self.assertTrue(loaded["KeepUpdatedEnabled"])
             self.assertEqual(loaded["KeepUpdatedLastScan"], "2026-06-29T12:00:00+00:00")
+            self.assertEqual(loaded["RepairRetentionCount"], 20)
 
     def test_invalid_store_query_settings_fall_back_to_defaults(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -71,6 +73,16 @@ class UserProfileTests(unittest.TestCase):
             self.assertEqual(loaded["StoreRing"], "Retail")
             self.assertEqual(loaded["StoreLanguage"], "en-US")
             self.assertEqual(loaded["StoreMarket"], "US")
+
+    def test_repair_retention_is_bounded(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_path = os.path.join(temp_dir, "profile.json")
+            with open(profile_path, "w", encoding="utf-8") as handle:
+                handle.write('{"RepairRetentionCount":500}')
+
+            loaded = StoreAPI.load_user_profile(profile_path)
+
+            self.assertEqual(loaded["RepairRetentionCount"], 50)
 
 
 if __name__ == "__main__":

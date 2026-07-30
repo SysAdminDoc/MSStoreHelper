@@ -2,109 +2,336 @@
 
 import json
 import os
+import shutil
 import tempfile
+import threading
 import unittest
+import uuid
+from pathlib import Path
 from unittest.mock import patch
 
-from MSStoreHelper import StoreAPI
+import repair_transaction as repair
 
 
-class FakePowerShellResult:
-    def __init__(self, returncode=0, stdout="", stderr=""):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
+WINDOWS_POWERSHELL = (
+    r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+)
 
 
-class StoreRepairTests(unittest.TestCase):
-    def test_repair_steps_include_cache_token_and_license_sync(self):
-        steps = StoreAPI.get_store_repair_steps()
-        descriptions = "\n".join(description for description, _command in steps)
-        commands = "\n".join(command for _description, command in steps)
+class StoreRepairPlanTests(unittest.TestCase):
+    def test_production_plans_are_exact_and_fail_closed(self):
+        with tempfile.TemporaryDirectory() as backup_base:
+            for repair_type in (
+                "store-repair",
+                "provisioning-repair",
+                "licensing-reset",
+                "cache-rebuild",
+            ):
+                plan = repair.build_repair_plan(
+                    repair_type,
+                    backup_base=backup_base,
+                )
+                rendered = repair.render_repair_plan(plan)
 
-        self.assertIn("Resetting Store cache", descriptions)
-        self.assertIn("Rebuilding Store token cache", descriptions)
-        self.assertIn("Re-syncing Store licensing", descriptions)
-        self.assertIn("wsreset.exe", commands)
-        self.assertIn("TokenBroker", commands)
-        self.assertIn("ClipSVC", commands)
-        self.assertIn("LicenseManager", commands)
-        self.assertIn("Microsoft.StorePurchaseApp", commands)
-        self.assertIn("Backup-MSStoreHelperPath", commands)
+                self.assertEqual(
+                    uuid.UUID(plan["OperationId"]).version,
+                    4,
+                )
+                self.assertTrue(plan["ConfirmationToken"])
+                self.assertTrue(plan["Impact"])
+                self.assertTrue(plan["Permissions"])
+                self.assertIn("Administrator:", rendered)
+                self.assertIn("Reboot:", rendered)
+                self.assertIn("Backups before mutation:", rendered)
+                self.assertIn("Preconditions:", rendered)
+                self.assertIn("Mutation steps:", rendered)
+                self.assertNotIn("SilentlyContinue } catch", rendered)
+                for step in plan["Steps"]:
+                    self.assertIn("-ErrorAction Stop", step["Command"])
 
-    def test_provisioning_repair_steps_clear_deprovisioned_store_keys(self):
-        steps = StoreAPI.get_provisioning_repair_steps()
-        descriptions = "\n".join(description for description, _command in steps)
-        commands = "\n".join(command for _description, command in steps)
+    def test_confirmation_token_is_mandatory(self):
+        with tempfile.TemporaryDirectory() as sandbox:
+            state = Path(sandbox, "state")
+            state.mkdir()
+            with tempfile.TemporaryDirectory() as backup_base:
+                plan = repair.build_sandbox_repair_plan(
+                    sandbox,
+                    backup_base=backup_base,
+                )
+                with self.assertRaisesRegex(
+                    repair.RepairTransactionError,
+                    "confirmation",
+                ):
+                    repair.execute_repair_plan(
+                        plan,
+                        confirmation_token="wrong",
+                        powershell_exe=WINDOWS_POWERSHELL,
+                        secure_backup=False,
+                    )
 
-        self.assertIn("Clearing Store deprovision tombstones", descriptions)
-        self.assertIn("Re-registering Store apps", descriptions)
-        self.assertIn("AppxAllUserStore\\Deprovisioned", commands)
-        self.assertIn("Microsoft.WindowsStore", commands)
-        self.assertIn("Microsoft.StorePurchaseApp", commands)
-        self.assertIn("Microsoft.DesktopAppInstaller", commands)
-        self.assertIn("Add-AppxPackage", commands)
-        self.assertIn("Backup-MSStoreHelperRegistryPath", commands)
+    def test_legacy_best_effort_runner_is_disabled(self):
+        from MSStoreHelper import StoreAPI
 
-    def test_licensing_reset_steps_restart_services_and_clear_cache(self):
-        steps = StoreAPI.get_licensing_reset_steps()
-        descriptions = "\n".join(description for description, _command in steps)
-        commands = "\n".join(command for _description, command in steps)
+        with self.assertRaisesRegex(
+            repair.RepairTransactionError,
+            "explicitly confirm",
+        ):
+            StoreAPI._run_powershell_steps([
+                ("unsafe", "Write-Output 'should not run'"),
+            ])
 
-        self.assertIn("Stopping licensing services", descriptions)
-        self.assertIn("Clearing ClipSVC license cache", descriptions)
-        self.assertIn("Starting licensing services", descriptions)
-        self.assertIn("ClipSVC", commands)
-        self.assertIn("LicenseManager", commands)
-        self.assertIn("GenuineTicket", commands)
-        self.assertIn("Microsoft.StorePurchaseApp", commands)
-        self.assertIn("Backup-MSStoreHelperPath", commands)
+    def test_operation_lock_is_exclusive_and_uuid_owned(self):
+        with tempfile.TemporaryDirectory() as backup_base:
+            owner = str(uuid.uuid4())
+            with repair.RepairOperationLock(backup_base, owner):
+                with self.assertRaises(repair.RepairLockError):
+                    with repair.RepairOperationLock(
+                        backup_base,
+                        str(uuid.uuid4()),
+                    ):
+                        self.fail("The second operation acquired the lock")
+            lock_record = json.loads(
+                Path(backup_base, repair.LOCK_FILENAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(lock_record["OperationId"], owner)
 
-    def test_cache_rebuild_steps_scan_backup_and_recreate_cache(self):
-        steps = StoreAPI.get_cache_rebuild_steps()
-        descriptions = "\n".join(description for description, _command in steps)
-        commands = "\n".join(command for _description, command in steps)
+    def test_retention_prunes_only_transaction_directories(self):
+        with tempfile.TemporaryDirectory() as backup_base:
+            roots = []
+            for index in range(3):
+                root = Path(backup_base, f"repair-{index}")
+                root.mkdir()
+                manifest = {
+                    "CompletedAt": f"2026-07-2{index}T00:00:00+00:00",
+                }
+                Path(root, repair.MANIFEST_FILENAME).write_text(
+                    json.dumps(manifest),
+                    encoding="utf-8",
+                )
+                roots.append(root)
+            unrelated = Path(backup_base, "unrelated")
+            unrelated.mkdir()
 
-        self.assertIn("Scanning Store cache folders", descriptions)
-        self.assertIn("Backing up existing Store caches", descriptions)
-        self.assertIn("Rebuilding clean Store cache folders", descriptions)
-        self.assertIn("LocalCache", commands)
-        self.assertIn("INetCache", commands)
-        self.assertIn("Backup-MSStoreHelperPath", commands)
-        self.assertIn("New-Item", commands)
-        self.assertIn("wsreset.exe", commands)
+            removed = repair._prune_repair_backups(
+                backup_base,
+                retention_count=1,
+            )
 
-    def test_run_powershell_steps_records_manifest_restore_script_and_output(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            with patch("MSStoreHelper.subprocess.run", return_value=FakePowerShellResult(1, "out text", "err text")) as run_mock:
-                results = StoreAPI._run_powershell_steps(
-                    [("Failing step", "Write-Error 'bad'")],
-                    timeout=5,
-                    repair_name="unit-test",
-                    backup_root=temp_dir,
+            self.assertEqual(len(removed), 2)
+            self.assertTrue(roots[-1].is_dir())
+            self.assertTrue(unrelated.is_dir())
+
+
+@unittest.skipUnless(
+    os.name == "nt" and os.path.isfile(WINDOWS_POWERSHELL),
+    "Real repair transaction tests require Windows PowerShell",
+)
+class StoreRepairWindowsSandboxTests(unittest.TestCase):
+    def _create_sandbox(self, root):
+        sandbox = Path(root, "sandbox")
+        state = Path(sandbox, "state")
+        nested = Path(state, "nested")
+        nested.mkdir(parents=True)
+        Path(state, "state.txt").write_text(
+            "original",
+            encoding="utf-8",
+        )
+        Path(nested, "data.bin").write_bytes(b"\x00\x01original")
+        return sandbox, state
+
+    def test_real_repair_and_repeatable_restore_preserve_backup(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            sandbox, state = self._create_sandbox(temp_root)
+            backup_base = Path(temp_root, "backups")
+            backup_base.mkdir()
+            plan = repair.build_sandbox_repair_plan(
+                sandbox,
+                backup_base=backup_base,
+                retention_count=3,
+            )
+
+            context = repair.execute_repair_plan(
+                plan,
+                confirmation_token=plan["ConfirmationToken"],
+                powershell_exe=WINDOWS_POWERSHELL,
+                secure_backup=True,
+            )
+
+            self.assertEqual(context["Outcome"], "succeeded")
+            self.assertEqual(
+                Path(state, "state.txt").read_text(encoding="utf-8"),
+                "mutated",
+            )
+            restore_plan = repair.build_restore_plan(
+                context["BackupRoot"],
+                backup_base=backup_base,
+                allow_sandbox=True,
+            )
+            self.assertIn(
+                "backups are retained",
+                repair.render_restore_plan(restore_plan),
+            )
+            backup_path = Path(
+                restore_plan["RestoreTargets"][0]["BackupPath"]
+            )
+            backup_digest = repair._filesystem_inventory(
+                backup_path
+            )["Digest"]
+
+            first_restore = repair.execute_restore_plan(
+                restore_plan,
+                confirmation_token=restore_plan["ConfirmationToken"],
+                powershell_exe=WINDOWS_POWERSHELL,
+                secure_backup=True,
+            )
+            self.assertEqual(first_restore["Outcome"], "succeeded")
+            self.assertEqual(
+                Path(state, "state.txt").read_text(encoding="utf-8"),
+                "original",
+            )
+
+            Path(state, "state.txt").write_text(
+                "changed again",
+                encoding="utf-8",
+            )
+            second_restore = repair.execute_restore_plan(
+                restore_plan,
+                confirmation_token=restore_plan["ConfirmationToken"],
+                powershell_exe=WINDOWS_POWERSHELL,
+                secure_backup=True,
+            )
+
+            self.assertEqual(second_restore["Outcome"], "succeeded")
+            self.assertEqual(
+                Path(state, "state.txt").read_text(encoding="utf-8"),
+                "original",
+            )
+            self.assertEqual(
+                repair._filesystem_inventory(backup_path)["Digest"],
+                backup_digest,
+            )
+            history = Path(
+                restore_plan["RestoreHistoryPath"]
+            ).read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(history), 2)
+
+    def test_precondition_failure_stops_before_mutation(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            sandbox, state = self._create_sandbox(temp_root)
+            backup_base = Path(temp_root, "backups")
+            backup_base.mkdir()
+            plan = repair.build_sandbox_repair_plan(
+                sandbox,
+                backup_base=backup_base,
+            )
+            plan["Preconditions"][0]["Command"] = (
+                "throw 'intentional precondition failure'"
+            )
+
+            context = repair.execute_repair_plan(
+                plan,
+                confirmation_token=plan["ConfirmationToken"],
+                powershell_exe=WINDOWS_POWERSHELL,
+                secure_backup=True,
+            )
+
+            self.assertEqual(context["Outcome"], "preflight-failed")
+            self.assertFalse(context["MutationStarted"])
+            self.assertEqual(
+                Path(state, "state.txt").read_text(encoding="utf-8"),
+                "original",
+            )
+
+    def test_cancellation_is_observed_at_a_safe_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            sandbox, state = self._create_sandbox(temp_root)
+            backup_base = Path(temp_root, "backups")
+            backup_base.mkdir()
+            plan = repair.build_sandbox_repair_plan(
+                sandbox,
+                backup_base=backup_base,
+            )
+            cancel_event = threading.Event()
+            cancel_event.set()
+
+            context = repair.execute_repair_plan(
+                plan,
+                confirmation_token=plan["ConfirmationToken"],
+                powershell_exe=WINDOWS_POWERSHELL,
+                cancel_event=cancel_event,
+                secure_backup=True,
+            )
+
+            self.assertEqual(context["Outcome"], "cancelled")
+            self.assertFalse(context["MutationStarted"])
+            self.assertEqual(
+                Path(state, "state.txt").read_text(encoding="utf-8"),
+                "original",
+            )
+
+    def test_tampered_backup_is_rejected_before_restore(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            sandbox, _state = self._create_sandbox(temp_root)
+            backup_base = Path(temp_root, "backups")
+            backup_base.mkdir()
+            plan = repair.build_sandbox_repair_plan(
+                sandbox,
+                backup_base=backup_base,
+            )
+            context = repair.execute_repair_plan(
+                plan,
+                confirmation_token=plan["ConfirmationToken"],
+                powershell_exe=WINDOWS_POWERSHELL,
+                secure_backup=True,
+            )
+            backup_path = Path(
+                context["BackupRoot"],
+                "files",
+                "sandbox-state",
+                "state.txt",
+            )
+            backup_path.write_text("tampered", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                repair.RepairTransactionError,
+                "hash",
+            ):
+                repair.build_restore_plan(
+                    context["BackupRoot"],
+                    backup_base=backup_base,
+                    allow_sandbox=True,
                 )
 
-            self.assertEqual(len(results), 1)
-            self.assertFalse(results[0]["Success"])
-            self.assertEqual(results[0]["ReturnCode"], 1)
-            self.assertEqual(results[0]["Stdout"], "out text")
-            self.assertEqual(results[0]["Stderr"], "err text")
-            self.assertTrue(os.path.exists(results[0]["ManifestPath"]))
-            self.assertTrue(os.path.exists(results[0]["RestoreScriptPath"]))
-            invoked_command = run_mock.call_args.args[0][-1]
-            self.assertIn("Backup-MSStoreHelperPath", invoked_command)
-            self.assertIn("Microsoft\\.PowerShell\\.Core\\\\Registry::HKEY_LOCAL_MACHINE", invoked_command)
-            self.assertIn("Write-Error 'bad'", invoked_command)
+    def test_insufficient_disk_space_fails_before_mutation(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            sandbox, state = self._create_sandbox(temp_root)
+            backup_base = Path(temp_root, "backups")
+            backup_base.mkdir()
+            plan = repair.build_sandbox_repair_plan(
+                sandbox,
+                backup_base=backup_base,
+            )
+            fake_usage = shutil._ntuple_diskusage(100, 100, 0)
 
-            with open(results[0]["ManifestPath"], "r", encoding="utf-8") as handle:
-                manifest = json.load(handle)
-            self.assertEqual(manifest["RepairName"], "unit-test")
-            self.assertEqual(manifest["Results"][0]["Stderr"], "err text")
+            with patch(
+                "repair_transaction.shutil.disk_usage",
+                return_value=fake_usage,
+            ):
+                context = repair.execute_repair_plan(
+                    plan,
+                    confirmation_token=plan["ConfirmationToken"],
+                    powershell_exe=WINDOWS_POWERSHELL,
+                    secure_backup=True,
+                )
 
-            with open(results[0]["RestoreScriptPath"], "r", encoding="utf-8") as handle:
-                restore_script = handle.read()
-            self.assertIn("backup-records.jsonl", restore_script)
-            self.assertIn("reg.exe import", restore_script)
+            self.assertEqual(context["Outcome"], "preflight-failed")
+            self.assertFalse(context["MutationStarted"])
+            self.assertEqual(
+                Path(state, "state.txt").read_text(encoding="utf-8"),
+                "original",
+            )
 
 
 if __name__ == "__main__":

@@ -10,6 +10,9 @@ All notable changes to MSStoreHelper will be documented in this file.
 - Added a hash-bound package trust report that requires valid Authenticode status, a valid Windows certificate chain, explicit revocation state, signed-manifest publisher/identity/version consistency, architecture/type sanity, and expected Store product or dependency binding.
 - Blocks untrusted or stale artifacts from install, rollback, shared cache, mirror, DISM, App Installer, and Intune promotion paths.
 - Added a queue quarantine and evidence-review dialog for otherwise-valid packages that lack an authoritative product binding; approved evidence is recorded in the local trust journal before automation is enabled.
+- Replaced best-effort repair recipes with inspected, explicitly confirmed transactions that lock by UUID, verify restrictive backup ACLs and disk space, and stop on failed preconditions, backups, mutations, or postconditions.
+- Added configurable backup retention, safe-checkpoint cancellation, per-item evidence manifests, and an in-app restore picker that hash-verifies filesystem and registry backups, restores service state, verifies package identities, and never consumes the source backup.
+- Added real Windows sandbox coverage for repair, fail-fast behavior, cancellation, tamper rejection, and repeatable restore.
 
 ## [v3.36.0] - 2026-07-29
 
