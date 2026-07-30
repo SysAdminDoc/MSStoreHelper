@@ -109,10 +109,28 @@ from store_sources import (
     source_status_summary,
 )
 
+MINIMUM_PYTHON = (3, 11)
+
+
+def python_runtime_error(version_info=None):
+    version = tuple((version_info or sys.version_info)[:2])
+    if version >= MINIMUM_PYTHON:
+        return None
+    return (
+        f"MSStoreHelper requires Python {MINIMUM_PYTHON[0]}.{MINIMUM_PYTHON[1]} "
+        f"or newer; detected Python {version[0]}.{version[1]}."
+    )
+
+
+_python_error = python_runtime_error()
+if _python_error:
+    print(_python_error, file=sys.stderr)
+    raise SystemExit(1)
+
 # ==================== DEPENDENCY CHECK ====================
 REQUIRED_DEPENDENCIES = {
     "customtkinter": "customtkinter==5.2.2",
-    "requests": "requests==2.32.5",
+    "requests": "requests==2.34.2",
     "bs4": "beautifulsoup4==4.14.3",
 }
 
@@ -131,12 +149,13 @@ def dependency_setup_message(missing):
     requirements = ", ".join(missing)
     return (
         f"Missing Python dependencies: {requirements}\n"
-        "Install pinned dependencies with:\n"
-        "  py -3 -m pip install -r requirements.txt\n"
-        "For offline installs, prepare a wheelhouse on a connected PC:\n"
-        "  py -3 -m pip download -r requirements.txt -d wheelhouse\n"
+        "Install the artifact-hashed dependency graph with:\n"
+        "  py -3 -m pip install --require-hashes -r requirements.txt\n"
+        "For offline installs, build and test a target wheelhouse on a connected PC:\n"
+        "  py -3 scripts\\build_wheelhouse.py --output wheelhouse --test\n"
         "Then install on the target PC with:\n"
-        "  py -3 -m pip install --no-index --find-links wheelhouse -r requirements.txt"
+        "  py -3 -m pip install --no-index --find-links wheelhouse "
+        "--require-hashes -r requirements.txt"
     )
 
 
@@ -2145,6 +2164,8 @@ if ($sig.SignerCertificate) {{
             (policy["BindHost"], int(port)),
             placeholder,
         )
+        server.daemon_threads = False
+        server.block_on_close = True
         actual_port = int(server.server_address[1])
         requires_authorization = not policy["Loopback"]
         token = ""

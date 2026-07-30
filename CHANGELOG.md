@@ -18,6 +18,8 @@ All notable changes to MSStoreHelper will be documented in this file.
 - Kept mirror binding loopback-only by default; non-loopback use now requires explicit LAN mode, short-lived header-only bearer authentication, and either TLS or a cleartext-risk acknowledgement.
 - Replaced shallow diagnostic regexes with fail-closed recursive redaction for structured fields and text attachments, including authorization values, quoted/spaced credentials, URL userinfo and signed-query keys, case-insensitive Windows/UNC paths, executable paths, and command transcripts.
 - Added an exact in-app diagnostic inventory/content preview and writes the reviewed bytes through a verified atomic ZIP replacement; unsupported values abort before a file is created.
+- Raised the supported runtime to CPython 3.11-3.14 and upgraded Requests to 2.34.2.
+- Added exact transitive pins, per-interpreter/architecture SHA-256 locks, verified offline wheelhouse manifests, and Windows x64/x86/ARM64 locked-environment CI with a fail-closed vulnerability audit.
 
 ## [v3.36.0] - 2026-07-29
 

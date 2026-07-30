@@ -3,7 +3,7 @@
 A GUI tool to download and install Microsoft Store apps **without needing the Microsoft Store**. Perfect for Windows LTSC editions, restricted environments, or when the Store just won't cooperate.
 
 ![Version](https://img.shields.io/badge/version-3.36.0-blue)
-![Python](https://img.shields.io/badge/python-3.8+-green)
+![Python](https://img.shields.io/badge/python-3.11--3.14-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-orange)
 
@@ -38,7 +38,7 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 - **Package Diff** - Compares cached package versions for manifest capability and dependency changes
 - **Source Health** - Detects StoreEdgeFD, RG-Adguard, WinGet, and Store CLI availability with fallback hints
 - **Store Query Controls** - Persists RG-Adguard ring, Store language, and market for localized package lookup and deployment artifacts
-- **Pinned Python Setup** - Uses `requirements.txt` and package metadata instead of runtime dependency installs
+- **Verified Python Setup** - Uses exact transitive pins, SHA-256 artifact locks, and tested offline wheelhouses
 - **Previewed Diagnostics Bundle** - Recursively redacts credentials, signed-URL secrets, local paths, commands, source health, queue state, logs, and repair evidence, then shows the exact ZIP contents before saving
 - **Accessibility Guardrails** - Keeps core theme contrast and the welcome surface usable at 100, 125, and 150 percent scaling
 - 📥 **Download Queue** - Queue multiple packages with progress tracking
@@ -61,10 +61,10 @@ A GUI tool to download and install Microsoft Store apps **without needing the Mi
 ## 🖥️ Requirements
 
 - **Windows 10/11** (including LTSC editions)
-- **Python 3.8+**
+- **CPython 3.11-3.14** on Windows x64, x86, or ARM64
 - **Administrator rights** (for installation only)
 
-Install pinned dependencies before first run:
+Install the artifact-hashed dependencies before first run:
 - `customtkinter` - Modern UI framework
 - `requests` - HTTP client
 - `beautifulsoup4` - HTML parsing
@@ -79,8 +79,8 @@ Install pinned dependencies before first run:
 git clone https://github.com/SysAdminDoc/MSStoreHelper.git
 cd MSStoreHelper
 
-# Install pinned dependencies
-py -3 -m pip install -r requirements.txt
+# Install the exact, wheel-only dependency graph
+py -3 -m pip install --require-hashes -r requirements.txt
 
 # Run
 python MSStoreHelper.py
@@ -88,9 +88,14 @@ python MSStoreHelper.py
 
 For offline PCs, prepare a wheelhouse on a connected PC:
 ```powershell
-py -3 -m pip download -r requirements.txt -d wheelhouse
-py -3 -m pip install --no-index --find-links wheelhouse -r requirements.txt
+py -3 scripts\build_wheelhouse.py --output wheelhouse --test
+py -3 -m pip install --no-index --find-links wheelhouse --require-hashes -r requirements.txt
 ```
+
+The wheelhouse command selects the lock for the running interpreter and
+architecture, verifies every wheel against its SHA-256, writes a manifest, performs
+an offline install, and runs the test suite. To prepare another target, pass one of
+the committed files under `locks\` with `--lock`.
 
 ### Option 2: Run as Admin (for installation features)
 ```powershell
@@ -257,8 +262,14 @@ MSStoreHelper/
 ├── package_trust.py               # Signature, manifest, identity, and promotion policy
 ├── repair_transaction.py          # Fail-closed repair, backup, and restore engine
 ├── pyproject.toml                 # Python package metadata
-├── requirements.txt               # Pinned runtime dependencies
+├── requirements.in                # Canonical fully pinned dependency graph
+├── requirements.txt               # Aggregate artifact-hashed Windows lock
+├── locks/                         # Per-interpreter and architecture hash locks
+├── scripts/
+│   ├── lock_dependencies.py       # Reproducible lock generator
+│   └── build_wheelhouse.py        # Offline wheelhouse build and verification
 ├── tests/
+│   ├── test_dependency_locks.py   # Runtime floor and supply-chain lock tests
 │   ├── test_package_resolution.py # Resolver tests
 │   ├── test_package_ingress.py    # Adversarial ingress and path tests
 │   ├── test_package_trust.py      # Trust, quarantine, and promotion-gate tests

@@ -1,0 +1,68 @@
+name: Dependency locks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  locked-runtime:
+    name: CPython ${{ matrix.python }} / ${{ matrix.target.architecture }}
+    runs-on: ${{ matrix.target.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+        target:
+          - runner: windows-latest
+            architecture: x64
+          - runner: windows-latest
+            architecture: x86
+          - runner: windows-11-arm
+            architecture: arm64
+    steps:
+      - name: Check out the exact source revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install the target interpreter
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.target.architecture }}
+
+      - name: Build, install, and test the locked wheelhouse
+        shell: pwsh
+        run: >-
+          python scripts/build_wheelhouse.py
+          --output "$env:RUNNER_TEMP\msstorehelper-wheelhouse"
+          --test
+
+  lock-integrity:
+    name: Lock freshness and vulnerability audit
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the exact source revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install lock-generation interpreter
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+          architecture: x64
+
+      - name: Reject stale or incomplete lock files
+        run: python scripts/lock_dependencies.py --check
+
+      - name: Audit the exact locked dependency graph
+        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
+        with:
+          inputs: locks/windows-cp312-x64.txt
+          require-hashes: true

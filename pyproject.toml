@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools==83.0.0", "wheel==0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,14 +7,14 @@ name = "msstorehelper"
 version = "3.36.0"
 description = "GUI tool to download and install Microsoft Store apps without the Store UI."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 license = "MIT"
 authors = [
   { name = "SysAdminDoc", email = "matt_parker@outlook.com" }
 ]
 dependencies = [
   "customtkinter==5.2.2",
-  "requests==2.32.5",
+  "requests==2.34.2",
   "beautifulsoup4==4.14.3",
 ]
 

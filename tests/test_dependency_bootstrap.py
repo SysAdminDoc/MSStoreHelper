@@ -2,7 +2,11 @@
 
 import unittest
 
-from MSStoreHelper import dependency_setup_message, find_missing_dependencies
+from MSStoreHelper import (
+    dependency_setup_message,
+    find_missing_dependencies,
+    python_runtime_error,
+)
 
 
 class DependencyBootstrapTests(unittest.TestCase):
@@ -12,14 +16,19 @@ class DependencyBootstrapTests(unittest.TestCase):
                 raise ImportError(name)
             return object()
 
-        self.assertEqual(find_missing_dependencies(fake_import), ["requests==2.32.5"])
+        self.assertEqual(find_missing_dependencies(fake_import), ["requests==2.34.2"])
 
     def test_dependency_setup_message_includes_online_and_offline_commands(self):
         message = dependency_setup_message(["customtkinter==5.2.2"])
 
-        self.assertIn("pip install -r requirements.txt", message)
-        self.assertIn("pip download -r requirements.txt -d wheelhouse", message)
+        self.assertIn("pip install --require-hashes -r requirements.txt", message)
+        self.assertIn("scripts\\build_wheelhouse.py --output wheelhouse --test", message)
         self.assertIn("--no-index --find-links wheelhouse", message)
+
+    def test_runtime_floor_rejects_unsupported_python(self):
+        self.assertIn("detected Python 3.10", python_runtime_error((3, 10)))
+        self.assertIsNone(python_runtime_error((3, 11)))
+        self.assertIsNone(python_runtime_error((3, 14)))
 
 
 if __name__ == "__main__":

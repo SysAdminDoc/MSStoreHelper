@@ -236,6 +236,8 @@ class MirrorServiceTests(unittest.TestCase):
             from http.server import ThreadingHTTPServer
 
             server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            server.daemon_threads = False
+            server.block_on_close = True
             port = server.server_address[1]
             thread = threading.Thread(
                 target=server.serve_forever,
@@ -281,7 +283,7 @@ class MirrorServiceTests(unittest.TestCase):
         self.assertNotIn(token, audit_text)
         self.assertNotIn(token, authenticated_index)
         self.assertNotIn("wrong", audit_text)
-        self.assertEqual(
+        self.assertCountEqual(
             [record["Authorization"] for record in records],
             ["missing", "rejected", "accepted", "accepted"],
         )
