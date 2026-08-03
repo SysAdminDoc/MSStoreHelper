@@ -112,7 +112,12 @@ def is_arch_compatible(package, target_arch):
     arch = package_architecture(package)
     if is_bundle_package(package):
         return True
-    return arch in {target_arch.lower(), "neutral"}
+    accepted = {target_arch.lower(), "neutral"}
+    if is_dependency_package(package) and target_arch.lower() == "x64":
+        accepted.add("x86")
+    if is_dependency_package(package) and target_arch.lower() == "arm64":
+        accepted.update({"arm", "x86"})
+    return arch in accepted
 
 
 def package_version_tuple(filename):
@@ -210,7 +215,11 @@ def select_recommended_packages(packages, target_arch, prefer_exact_arch=False):
         if not is_arch_compatible(package, target_arch):
             continue
 
-        key = package_identity(package["FileName"]).lower()
+        identity = package_identity(package["FileName"]).lower()
+        key = (
+            identity,
+            package_architecture(package),
+        ) if is_dependency_package(package) else identity
         current = best_by_identity.get(key)
         if current is None or _candidate_score(package, target_arch, prefer_exact_arch) > _candidate_score(current, target_arch, prefer_exact_arch):
             best_by_identity[key] = package

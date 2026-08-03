@@ -142,6 +142,14 @@ from windows_capabilities import (
     probe_windows_capabilities,
     query_appx_inventory,
 )
+from appx_install_planner import (
+    InstallPlanError,
+    build_install_plan as build_manifest_install_plan,
+    inspect_appx_archive,
+    inspection_supports_architecture,
+    render_install_plan,
+    validate_install_plan,
+)
 
 MINIMUM_PYTHON = (3, 11)
 
@@ -2833,6 +2841,7 @@ if ($sig.SignerCertificate) {{
         package_identity_name,
         artifact_path,
         package=None,
+        target_arch=None,
         cancel_event=None,
     ):
         try:
@@ -2845,6 +2854,28 @@ if ($sig.SignerCertificate) {{
         identity = str(package_identity_name or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", identity):
             return False, "Rollback package identity is invalid"
+        try:
+            inspection = inspect_appx_archive(package_path)
+        except ValueError as exc:
+            return False, str(exc)
+        manifest_identity = inspection["Identity"]["Name"]
+        if manifest_identity.lower() != identity.lower():
+            return (
+                False,
+                "Rollback artifact identity does not match the "
+                f"installed package: {manifest_identity} != {identity}",
+            )
+        if (
+            target_arch
+            and not inspection_supports_architecture(
+                inspection,
+                target_arch,
+            )
+        ):
+            return (
+                False,
+                f"Rollback artifact does not support {target_arch}",
+            )
         trust_package = package or {
             "FileName": os.path.basename(package_path),
             "ExpectedPackageIdentity": identity,
@@ -2860,7 +2891,11 @@ if ($sig.SignerCertificate) {{
             "$ErrorActionPreference = 'Stop'",
             "$identity = $env:MSSTOREHELPER_ROLLBACK_IDENTITY",
             "$path = $env:MSSTOREHELPER_PACKAGE_PATH",
-            "$current = Get-AppxPackage -Name $identity | Sort-Object Version -Descending | Select-Object -First 1",
+            "$architecture = $env:MSSTOREHELPER_TARGET_ARCHITECTURE",
+            "$current = Get-AppxPackage -Name $identity | Where-Object {",
+            "    [string]::IsNullOrWhiteSpace($architecture) -or",
+            "    ([string]$_.Architecture).ToLowerInvariant() -in @($architecture.ToLowerInvariant(), 'neutral')",
+            "} | Sort-Object Version -Descending | Select-Object -First 1",
             "if ($current) {",
             "    try {",
             "        Remove-AppxPackage -Package $current.PackageFullName -PreserveApplicationData -ErrorAction Stop",
@@ -2880,6 +2915,9 @@ if ($sig.SignerCertificate) {{
             environment = os.environ.copy()
             environment["MSSTOREHELPER_PACKAGE_PATH"] = package_path
             environment["MSSTOREHELPER_ROLLBACK_IDENTITY"] = identity
+            environment["MSSTOREHELPER_TARGET_ARCHITECTURE"] = str(
+                target_arch or ""
+            )
             result = run_command(
                 [POWERSHELL_EXE, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
                 env=environment,
@@ -2921,22 +2959,35 @@ if ($sig.SignerCertificate) {{
 
     @staticmethod
     def generate_dism_provision_script(packages, output_path, target_arch=SYSTEM_ARCH, script_dir=None):
-        provisionable = []
-        for package in packages:
-            if not package.get("FileName"):
-                continue
-            if str(package["FileName"]).lower().endswith(".blockmap"):
-                continue
-            package = validate_package_record(package, require_url=False)
-            if is_installable_package(package):
-                provisionable.append(annotate_package(package))
-
-        provisionable = StoreAPI.order_packages_for_install(provisionable, target_arch)
-        if not provisionable:
-            raise ValueError("No AppX/MSIX packages are available in the queue")
-
+        plan = StoreAPI.build_install_plan(
+            packages,
+            output_path,
+            target_arch,
+        )
+        if not plan["Installable"]:
+            raise InstallPlanError(
+                "; ".join(
+                    conflict["Message"]
+                    for conflict in plan["Conflicts"]
+                    if conflict.get("Blocking")
+                )
+            )
         script_dir = script_dir or output_path
         generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        main_path = StoreAPI._portable_script_path(
+            plan["Main"]["Path"],
+            script_dir,
+        )
+        dependency_paths = [
+            StoreAPI._portable_script_path(item["Path"], script_dir)
+            for item in (
+                plan["Dependencies"] + plan["ResourcePackages"]
+            )
+        ]
+        optional_paths = [
+            StoreAPI._portable_script_path(item["Path"], script_dir)
+            for item in plan["OptionalPackages"]
+        ]
         lines = [
             f"# Generated by {APP_NAME} v{APP_VERSION} on {generated_at}",
             "# Run from an elevated PowerShell session.",
@@ -2950,49 +3001,62 @@ if ($sig.SignerCertificate) {{
             "    return Join-Path -Path $ScriptRoot -ChildPath $Path",
             "}",
             "",
-            "$packages = @(",
+            (
+                "$mainPackage = Resolve-QueuePackagePath "
+                f"{StoreAPI._powershell_literal(main_path)}"
+            ),
+            "$dependencyPackages = @(",
         ]
-
-        for package in provisionable:
-            filename = package["FileName"]
-            package_path = StoreAPI._queue_package_source_path(package, output_path)
-            portable_path = StoreAPI._portable_script_path(package_path, script_dir)
-            role = package.get("PackageRoleLabel") or package_role_label(filename)
-            query = StoreAPI._package_store_query(package)
+        for path in dependency_paths:
             lines.append(
-                "    [pscustomobject]@{ "
-                f"FileName = {StoreAPI._powershell_literal(filename)}; "
-                f"Role = {StoreAPI._powershell_literal(role)}; "
-                f"PackagePath = {StoreAPI._powershell_literal(portable_path)}; "
-                f"StoreRing = {StoreAPI._powershell_literal(query['Ring'])}; "
-                f"StoreLanguage = {StoreAPI._powershell_literal(query['Language'])}; "
-                f"StoreMarket = {StoreAPI._powershell_literal(query['Market'])} "
-                "}"
+                "    (Resolve-QueuePackagePath "
+                f"{StoreAPI._powershell_literal(path)})"
             )
-
+        lines.extend([
+            ")",
+        ])
+        lines.append("$optionalPackages = @(")
+        for path in optional_paths:
+            lines.append(
+                "    (Resolve-QueuePackagePath "
+                f"{StoreAPI._powershell_literal(path)})"
+            )
         lines.extend([
             ")",
             "",
-            "foreach ($package in $packages) {",
-            "    $packagePath = Resolve-QueuePackagePath $package.PackagePath",
+            "$allPackages = @($mainPackage) + "
+            "$dependencyPackages + $optionalPackages",
+            "foreach ($packagePath in $allPackages) {",
             "    if (-not (Test-Path -LiteralPath $packagePath)) {",
             "        throw \"Package not found: $packagePath\"",
             "    }",
-            "",
-            "    Write-Host (\"Provisioning {0} [{1}] from {2}/{3}/{4}\" -f $package.FileName, $package.Role, $package.StoreRing, $package.StoreLanguage, $package.StoreMarket)",
-            "    $arguments = @(",
-            "        '/Online',",
-            "        '/Add-ProvisionedAppxPackage',",
-            "        \"/PackagePath:$packagePath\",",
-            "        '/SkipLicense'",
-            "    )",
-            "    & dism.exe @arguments",
-            "    if ($LASTEXITCODE -ne 0) {",
-            "        throw \"DISM failed with exit code $LASTEXITCODE for $($package.FileName)\"",
-            "    }",
             "}",
             "",
-            "Write-Host \"Provisioning script complete: $($packages.Count) package(s).\"",
+            "$parameters = @{",
+            "    Online = $true",
+            "    PackagePath = $mainPackage",
+            "    SkipLicense = $true",
+            "    ErrorAction = 'Stop'",
+            "}",
+            "if ($dependencyPackages.Count -gt 0) {",
+            (
+                "    $parameters.DependencyPackagePath = "
+                "$dependencyPackages"
+            ),
+            "}",
+            "if ($optionalPackages.Count -gt 0) {",
+            "    $parameters.OptionalPackagePath = $optionalPackages",
+            "}",
+            "",
+            (
+                "Write-Host "
+                f"{StoreAPI._powershell_literal('Provisioning inspected plan for ' + plan['Main']['Identity']['Name'])}"
+            ),
+            "Add-AppxProvisionedPackage @parameters | Out-Host",
+            (
+                "Write-Host "
+                f"{StoreAPI._powershell_literal('Provisioning plan complete: ' + str(1 + len(dependency_paths) + len(optional_paths)) + ' package(s).')}"
+            ),
             "",
         ])
         return "\n".join(lines)
@@ -3004,112 +3068,25 @@ if ($sig.SignerCertificate) {{
         os.makedirs(script_dir, exist_ok=True)
         with open(script_path, "w", encoding="utf-8", newline="\r\n") as handle:
             handle.write(script)
+        StoreAPI.validate_powershell_script(script_path)
+        plan = StoreAPI.build_install_plan(
+            packages,
+            output_path,
+            target_arch,
+        )
+        StoreAPI.write_install_plan(
+            plan,
+            f"{os.path.splitext(script_path)[0]}.installplan.json",
+        )
         return script_path
 
     @staticmethod
-    def _xml_local_name(tag):
-        return tag.rsplit("}", 1)[-1] if "}" in tag else tag
-
-    @staticmethod
-    def _read_appx_manifest_root(package_path):
-        manifest_names = (
-            "AppxManifest.xml",
-            "AppxMetadata/AppxBundleManifest.xml",
-        )
-        try:
-            with zipfile.ZipFile(package_path) as archive:
-                available = {name.replace("\\", "/"): name for name in archive.namelist()}
-                manifest_name = next((available[name] for name in manifest_names if name in available), None)
-                if not manifest_name:
-                    raise ValueError("AppX manifest was not found")
-                return ET.fromstring(archive.read(manifest_name)), manifest_name
-        except zipfile.BadZipFile as exc:
-            raise ValueError(f"Package is not a readable AppX/MSIX archive: {package_path}") from exc
-
-    @staticmethod
-    def _appx_identity_from_root(root, package_path):
-        identity = None
-        for element in root.iter():
-            if StoreAPI._xml_local_name(element.tag) == "Identity":
-                identity = element
-                break
-        if identity is None:
-            raise ValueError(f"Package identity was not found: {package_path}")
-
-        name = identity.attrib.get("Name", "").strip()
-        publisher = identity.attrib.get("Publisher", "").strip()
-        version = identity.attrib.get("Version", "").strip()
-        architecture = identity.attrib.get("ProcessorArchitecture", "").strip().lower()
-        if not name or not publisher or not version:
-            raise ValueError(f"Package identity is incomplete: {package_path}")
-
-        return {
-            "Name": name,
-            "Publisher": publisher,
-            "Version": version,
-            "ProcessorArchitecture": architecture or "neutral",
-        }
-
-    @staticmethod
     def read_appx_identity(package_path):
-        root, _manifest_name = StoreAPI._read_appx_manifest_root(package_path)
-        return StoreAPI._appx_identity_from_root(root, package_path)
-
-    @staticmethod
-    def _dependency_label(element):
-        local_name = StoreAPI._xml_local_name(element.tag)
-        attrs = element.attrib
-        if local_name == "PackageDependency":
-            name = attrs.get("Name", "").strip()
-            min_version = attrs.get("MinVersion", "").strip()
-            publisher = attrs.get("Publisher", "").strip()
-            label = f"{name} >= {min_version}" if min_version else name
-            if publisher:
-                label = f"{label} ({publisher})"
-            return label.strip()
-        if local_name == "TargetDeviceFamily":
-            name = attrs.get("Name", "").strip()
-            minimum = attrs.get("MinVersion", "").strip()
-            tested = attrs.get("MaxVersionTested", "").strip()
-            pieces = [name]
-            if minimum:
-                pieces.append(f"min {minimum}")
-            if tested:
-                pieces.append(f"tested {tested}")
-            return " ".join(piece for piece in pieces if piece).strip()
-        return ""
+        return inspect_appx_archive(package_path)["Identity"]
 
     @staticmethod
     def read_appx_manifest_details(package_path):
-        root, manifest_name = StoreAPI._read_appx_manifest_root(package_path)
-        identity = StoreAPI._appx_identity_from_root(root, package_path)
-        capabilities = set()
-        dependencies = set()
-
-        for container in root.iter():
-            container_name = StoreAPI._xml_local_name(container.tag)
-            if container_name == "Capabilities":
-                for element in container:
-                    local_name = StoreAPI._xml_local_name(element.tag)
-                    if local_name in {"Capability", "DeviceCapability", "CustomCapability"}:
-                        name = element.attrib.get("Name", "").strip()
-                        if name:
-                            capabilities.add(f"{local_name}: {name}")
-            elif container_name == "Dependencies":
-                for element in container:
-                    local_name = StoreAPI._xml_local_name(element.tag)
-                    if local_name in {"PackageDependency", "TargetDeviceFamily"}:
-                        label = StoreAPI._dependency_label(element)
-                        if label:
-                            dependencies.add(f"{local_name}: {label}")
-
-        return {
-            "Path": os.path.abspath(package_path),
-            "ManifestName": manifest_name,
-            "Identity": identity,
-            "Capabilities": sorted(capabilities),
-            "Dependencies": sorted(dependencies),
-        }
+        return inspect_appx_archive(package_path)
 
     @staticmethod
     def _set_diff(old_values, new_values):
@@ -3125,13 +3102,44 @@ if ($sig.SignerCertificate) {{
     def diff_appx_manifests(old_package_path, new_package_path):
         old_details = StoreAPI.read_appx_manifest_details(old_package_path)
         new_details = StoreAPI.read_appx_manifest_details(new_package_path)
+        old_identity = old_details["Identity"]
+        new_identity = new_details["Identity"]
+
+        def inner_labels(details):
+            return sorted({
+                (
+                    f"{item['Identity']['Name']} "
+                    f"{item['Identity']['Version']} "
+                    f"[{item.get('BundleArchitecture') or item['Identity']['ProcessorArchitecture']}] "
+                    f"{item.get('BundlePackageType') or 'package'}"
+                )
+                for item in details.get("InnerPackages") or []
+            })
+
         return {
             "Old": old_details,
             "New": new_details,
-            "IdentityChanged": old_details["Identity"]["Name"] != new_details["Identity"]["Name"],
-            "VersionChanged": old_details["Identity"]["Version"] != new_details["Identity"]["Version"],
+            "IdentityChanged": (
+                old_identity["Name"] != new_identity["Name"]
+                or old_identity["Publisher"] != new_identity["Publisher"]
+            ),
+            "VersionChanged": (
+                old_identity["Version"] != new_identity["Version"]
+            ),
+            "ArchitectureChanged": (
+                old_details.get("Architectures")
+                != new_details.get("Architectures")
+            ),
+            "MinOSVersionChanged": (
+                old_details.get("MinOSVersion")
+                != new_details.get("MinOSVersion")
+            ),
             "Capabilities": StoreAPI._set_diff(old_details["Capabilities"], new_details["Capabilities"]),
             "Dependencies": StoreAPI._set_diff(old_details["Dependencies"], new_details["Dependencies"]),
+            "InnerPackages": StoreAPI._set_diff(
+                inner_labels(old_details),
+                inner_labels(new_details),
+            ),
         }
 
     @staticmethod
@@ -3187,8 +3195,29 @@ if ($sig.SignerCertificate) {{
         if diff.get("IdentityChanged"):
             lines.append(f"Identity changed: {old_identity['Name']} -> {new_identity['Name']}")
             lines.append("")
+        if diff.get("ArchitectureChanged"):
+            lines.append(
+                "Architectures changed: "
+                f"{','.join(diff['Old'].get('Architectures') or [])} -> "
+                f"{','.join(diff['New'].get('Architectures') or [])}"
+            )
+        if diff.get("MinOSVersionChanged"):
+            lines.append(
+                "Minimum OS changed: "
+                f"{diff['Old'].get('MinOSVersion') or 'unspecified'} -> "
+                f"{diff['New'].get('MinOSVersion') or 'unspecified'}"
+            )
+        if (
+            diff.get("ArchitectureChanged")
+            or diff.get("MinOSVersionChanged")
+        ):
+            lines.append("")
 
-        for section in ("Capabilities", "Dependencies"):
+        for section in (
+            "Capabilities",
+            "Dependencies",
+            "InnerPackages",
+        ):
             lines.append(section)
             changes = diff[section]
             changed = False
@@ -3202,6 +3231,100 @@ if ($sig.SignerCertificate) {{
                 lines.append(f"  Unchanged: {len(changes['Unchanged'])}")
             lines.append("")
         return "\n".join(lines).strip()
+
+    @staticmethod
+    def build_install_plan(
+        packages,
+        output_path,
+        target_arch=SYSTEM_ARCH,
+        *,
+        inventory=None,
+        target_os_version="",
+        allow_downgrade=False,
+    ):
+        records = []
+        for package in packages:
+            if not package.get("FileName"):
+                continue
+            if str(package["FileName"]).lower().endswith(".blockmap"):
+                continue
+            package = validate_package_record(
+                package.copy(),
+                require_url=False,
+            )
+            if not is_installable_package(package):
+                continue
+            source_path = StoreAPI._queue_package_source_path(
+                package,
+                output_path,
+            )
+            records.append({
+                "Path": source_path,
+                "FileName": package["FileName"],
+                "StoreQuery": StoreAPI._package_store_query(package),
+            })
+        if not records:
+            raise InstallPlanError(
+                "No inspected AppX/MSIX artifacts are available"
+            )
+        return build_manifest_install_plan(
+            records,
+            target_architecture=target_arch,
+            inventory=inventory,
+            target_os_version=target_os_version,
+            allow_downgrade=allow_downgrade,
+        )
+
+    @staticmethod
+    def write_install_plan(plan, plan_path):
+        validate_install_plan(plan)
+        plan_path = atomic_state_write_json(
+            os.path.abspath(plan_path),
+            plan,
+        )
+        with open(plan_path, encoding="utf-8") as handle:
+            validate_install_plan(json.load(handle))
+        return plan_path
+
+    @staticmethod
+    def validate_powershell_script(script_path):
+        script_path = os.path.abspath(script_path)
+        environment = os.environ.copy()
+        environment["MSSTOREHELPER_SCRIPT_PATH"] = script_path
+        command = "\n".join([
+            "$ErrorActionPreference = 'Stop'",
+            "$tokens = $null",
+            "$errors = $null",
+            (
+                "[void][System.Management.Automation.Language.Parser]"
+                "::ParseFile($env:MSSTOREHELPER_SCRIPT_PATH, "
+                "[ref]$tokens, [ref]$errors)"
+            ),
+            "if ($errors.Count -gt 0) {",
+            (
+                "  $errors | ForEach-Object { "
+                "Write-Error $_.Message -ErrorAction Continue }"
+            ),
+            "  exit 1",
+            "}",
+        ])
+        result = run_command(
+            [
+                POWERSHELL_EXE,
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                command,
+            ],
+            env=environment,
+            timeout=30,
+        )
+        if result.returncode:
+            raise ValueError(
+                (result.stderr or result.stdout or "").strip()
+                or f"PowerShell syntax validation failed for {script_path}"
+            )
+        return script_path
 
     @staticmethod
     def _file_uri(path):
@@ -3247,13 +3370,29 @@ if ($sig.SignerCertificate) {{
         if not records:
             raise ValueError("No AppX/MSIX packages are available for App Installer export")
 
-        apps = [record for record in records if record["Role"] == "App"]
-        if not apps:
-            raise ValueError("App Installer export requires at least one app package")
+        apps = [
+            record
+            for record in records
+            if str(record["Role"]).lower() == "app"
+        ]
+        if len(apps) != 1:
+            raise ValueError(
+                "App Installer export requires exactly one main app; "
+                "split independent apps into separate exports"
+            )
 
         main = apps[0]
-        dependencies = [record for record in records if record["Role"] != "App"]
-        optional = apps[1:]
+        dependencies = [
+            record
+            for record in records
+            if str(record["Role"]).lower()
+            in {"dependency", "resource"}
+        ]
+        optional = [
+            record
+            for record in records
+            if str(record["Role"]).lower() == "optional"
+        ]
 
         ET.register_namespace("", APPINSTALLER_NS)
         root = ET.Element(
@@ -3273,6 +3412,8 @@ if ($sig.SignerCertificate) {{
             }
             if not record["IsBundle"]:
                 attributes["ProcessorArchitecture"] = record["ProcessorArchitecture"]
+                if record.get("ResourceId"):
+                    attributes["ResourceId"] = record["ResourceId"]
             ET.SubElement(parent, f"{{{APPINSTALLER_NS}}}{StoreAPI._appinstaller_package_tag(record, main_package)}", attributes)
 
         add_package(root, main, main_package=True)
@@ -3298,22 +3439,94 @@ if ($sig.SignerCertificate) {{
             },
         )
 
-        return ET.tostring(root, encoding="utf-8", xml_declaration=True).decode("utf-8")
+        manifest = ET.tostring(
+            root,
+            encoding="utf-8",
+            xml_declaration=True,
+        ).decode("utf-8")
+        StoreAPI.validate_appinstaller_manifest(manifest, records)
+        return manifest
+
+    @staticmethod
+    def validate_appinstaller_manifest(manifest, records=None):
+        try:
+            root = ET.fromstring(manifest)
+        except ET.ParseError as exc:
+            raise ValueError(
+                "Generated App Installer XML is invalid"
+            ) from exc
+        if root.tag != f"{{{APPINSTALLER_NS}}}AppInstaller":
+            raise ValueError("Generated App Installer root is invalid")
+        main_elements = [
+            child
+            for child in root
+            if child.tag in {
+                f"{{{APPINSTALLER_NS}}}MainPackage",
+                f"{{{APPINSTALLER_NS}}}MainBundle",
+            }
+        ]
+        if len(main_elements) != 1:
+            raise ValueError(
+                "Generated App Installer must contain one main package"
+            )
+        package_elements = list(root.iter())
+        identities = []
+        for element in package_elements:
+            if element.tag.rsplit("}", 1)[-1] not in {
+                "MainPackage",
+                "MainBundle",
+                "Package",
+                "Bundle",
+            }:
+                continue
+            for attribute in ("Name", "Publisher", "Version", "Uri"):
+                if not str(element.attrib.get(attribute) or "").strip():
+                    raise ValueError(
+                        "Generated App Installer package identity is "
+                        f"missing {attribute}"
+                    )
+            identities.append((
+                element.attrib["Name"],
+                element.attrib["Publisher"],
+                element.attrib["Version"],
+                element.attrib.get("ResourceId", ""),
+            ))
+        if len(identities) != len(set(identities)):
+            raise ValueError(
+                "Generated App Installer contains duplicate packages"
+            )
+        if records is not None:
+            expected = {
+                (
+                    record["Name"],
+                    record["Publisher"],
+                    record["Version"],
+                    record.get("ResourceId", ""),
+                )
+                for record in records
+            }
+            if set(identities) != expected:
+                raise ValueError(
+                    "Generated App Installer does not round-trip the "
+                    "inspected package identities"
+                )
+        return root
 
     @staticmethod
     def write_appinstaller_export(packages, output_path, appinstaller_path, target_arch=SYSTEM_ARCH):
-        installable = []
-        for package in packages:
-            if not package.get("FileName"):
-                continue
-            if str(package["FileName"]).lower().endswith(".blockmap"):
-                continue
-            package = validate_package_record(package, require_url=False)
-            if is_installable_package(package):
-                installable.append(annotate_package(package))
-        installable = StoreAPI.order_packages_for_install(installable, target_arch)
-        if not installable:
-            raise ValueError("No AppX/MSIX packages are available for App Installer export")
+        plan = StoreAPI.build_install_plan(
+            packages,
+            output_path,
+            target_arch,
+        )
+        if not plan["Installable"]:
+            raise InstallPlanError(
+                "; ".join(
+                    conflict["Message"]
+                    for conflict in plan["Conflicts"]
+                    if conflict.get("Blocking")
+                )
+            )
 
         appinstaller_path = os.path.abspath(appinstaller_path)
         export_dir = os.path.dirname(appinstaller_path)
@@ -3331,17 +3544,59 @@ if ($sig.SignerCertificate) {{
             shutil.rmtree(package_dir)
         os.makedirs(package_dir, exist_ok=True)
 
-        records = [StoreAPI._appinstaller_record(package, output_path, package_dir) for package in installable]
+        records = []
+        planned = (
+            plan["Dependencies"]
+            + plan["ResourcePackages"]
+            + plan["OptionalPackages"]
+            + [plan["Main"]]
+        )
+        for item in planned:
+            filename = validate_package_filename(item["FileName"])
+            destination = confined_package_path(package_dir, filename)
+            if (
+                os.path.abspath(item["Path"]).lower()
+                != os.path.abspath(destination).lower()
+            ):
+                shutil.copy2(item["Path"], destination)
+            identity = item["Identity"]
+            records.append({
+                "FileName": filename,
+                "Path": destination,
+                "Uri": StoreAPI._file_uri(destination),
+                "Name": identity["Name"],
+                "Publisher": identity["Publisher"],
+                "Version": identity["Version"],
+                "ProcessorArchitecture": (
+                    identity.get("ProcessorArchitecture")
+                    or "neutral"
+                ),
+                "ResourceId": identity.get("ResourceId") or "",
+                "IsBundle": item["ContainerType"] == "bundle",
+                "Role": item["Role"],
+                "StoreQuery": item.get("StoreQuery") or {},
+            })
         manifest = StoreAPI.generate_appinstaller_manifest(records, appinstaller_path)
         with open(appinstaller_path, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(manifest)
             handle.write("\n")
+        with open(appinstaller_path, encoding="utf-8") as handle:
+            StoreAPI.validate_appinstaller_manifest(
+                handle.read(),
+                records,
+            )
+        plan_path = StoreAPI.write_install_plan(
+            plan,
+            f"{os.path.splitext(appinstaller_path)[0]}.installplan.json",
+        )
 
         return {
             "AppInstallerPath": appinstaller_path,
             "PackageDir": package_dir,
             "PackageCount": len(records),
-            "MainPackage": next(record["Name"] for record in records if record["Role"] == "App"),
+            "MainPackage": plan["Main"]["Identity"]["Name"],
+            "PlanPath": plan_path,
+            "Plan": plan,
         }
 
     @staticmethod
@@ -3440,83 +3695,122 @@ if ($sig.SignerCertificate) {{
 
     @staticmethod
     def _intune_package_records(packages, output_path, target_arch=SYSTEM_ARCH):
-        provisionable = []
-        for package in packages:
-            if not package.get("FileName"):
-                continue
-            if str(package["FileName"]).lower().endswith(".blockmap"):
-                continue
-            package = validate_package_record(package, require_url=False)
-            if is_installable_package(package):
-                provisionable.append(annotate_package(package))
-
-        provisionable = StoreAPI.order_packages_for_install(provisionable, target_arch)
+        plan = StoreAPI.build_install_plan(
+            packages,
+            output_path,
+            target_arch,
+        )
+        if not plan["Installable"]:
+            raise InstallPlanError(
+                "; ".join(
+                    conflict["Message"]
+                    for conflict in plan["Conflicts"]
+                    if conflict.get("Blocking")
+                )
+            )
         records = []
         seen = set()
-        for package in provisionable:
-            filename = package["FileName"]
+        planned = (
+            plan["Dependencies"]
+            + plan["ResourcePackages"]
+            + plan["OptionalPackages"]
+            + [plan["Main"]]
+        )
+        for item in planned:
+            filename = item["FileName"]
             if filename.lower() in seen:
                 continue
             seen.add(filename.lower())
-
-            source_path = StoreAPI._queue_package_source_path(package, output_path)
+            source_path = item["Path"]
             if not os.path.exists(source_path):
                 raise ValueError(f"Downloaded file is missing: {filename}")
-
             records.append({
                 "FileName": filename,
                 "SourcePath": source_path,
-                "Identity": package.get("PackageIdentity") or package_identity(filename),
-                "Version": package.get("AvailableVersion") or format_version_tuple(package_version_tuple(filename)),
-                "Role": package.get("PackageRoleLabel") or package_role_label(filename),
-                "StoreQuery": StoreAPI._package_store_query(package),
+                "Identity": item["Identity"]["Name"],
+                "Version": item["Identity"]["Version"],
+                "Role": item["Role"],
+                "StoreQuery": item.get("StoreQuery") or (
+                    StoreAPI.store_query_settings()
+                ),
             })
 
         if not records:
             raise ValueError("No downloaded AppX/MSIX packages are available for Intune packaging")
-        return records
+        return records, plan
 
     @staticmethod
     def _generate_intune_install_script(records):
+        mains = [
+            record
+            for record in records
+            if str(record["Role"]).lower() == "app"
+        ]
+        if len(mains) != 1:
+            raise InstallPlanError(
+                "Intune export requires exactly one main app"
+            )
+        dependencies = [
+            record
+            for record in records
+            if str(record["Role"]).lower()
+            in {"dependency", "resource"}
+        ]
+        optional = [
+            record
+            for record in records
+            if str(record["Role"]).lower() == "optional"
+        ]
         lines = [
             f"# Generated by {APP_NAME} v{APP_VERSION}",
             "$ErrorActionPreference = 'Stop'",
             "$PackageRoot = Join-Path -Path $PSScriptRoot -ChildPath 'Packages'",
             "",
-            "$packages = @(",
+            (
+                "$mainPackage = Join-Path -Path $PackageRoot "
+                f"-ChildPath {StoreAPI._powershell_literal(mains[0]['FileName'])}"
+            ),
+            "$dependencyPackages = @(",
         ]
-        for record in records:
-            query = record["StoreQuery"]
+        for record in dependencies:
             lines.append(
-                "    [pscustomobject]@{ "
-                f"FileName = {StoreAPI._powershell_literal(record['FileName'])}; "
-                f"Role = {StoreAPI._powershell_literal(record['Role'])}; "
-                f"StoreRing = {StoreAPI._powershell_literal(query['Ring'])}; "
-                f"StoreLanguage = {StoreAPI._powershell_literal(query['Language'])}; "
-                f"StoreMarket = {StoreAPI._powershell_literal(query['Market'])} "
-                "}"
+                "    (Join-Path -Path $PackageRoot -ChildPath "
+                f"{StoreAPI._powershell_literal(record['FileName'])})"
+            )
+        lines.extend([
+            ")",
+            "$optionalPackages = @(",
+        ])
+        for record in optional:
+            lines.append(
+                "    (Join-Path -Path $PackageRoot -ChildPath "
+                f"{StoreAPI._powershell_literal(record['FileName'])})"
             )
         lines.extend([
             ")",
             "",
-            "foreach ($package in $packages) {",
-            "    $packagePath = Join-Path -Path $PackageRoot -ChildPath $package.FileName",
+            "$allPackages = @($mainPackage) + "
+            "$dependencyPackages + $optionalPackages",
+            "foreach ($packagePath in $allPackages) {",
             "    if (-not (Test-Path -LiteralPath $packagePath)) {",
             "        throw \"Package not found: $packagePath\"",
             "    }",
-            "",
-            "    Write-Host (\"Provisioning {0} [{1}] from {2}/{3}/{4}\" -f $package.FileName, $package.Role, $package.StoreRing, $package.StoreLanguage, $package.StoreMarket)",
-            "    $arguments = @(",
-            "        '/Online',",
-            "        '/Add-ProvisionedAppxPackage',",
-            "        \"/PackagePath:$packagePath\",",
-            "        '/SkipLicense'",
-            "    )",
-            "    & dism.exe @arguments",
-            "    if ($LASTEXITCODE -ne 0) {",
-            "        throw \"DISM failed with exit code $LASTEXITCODE for $($package.FileName)\"",
-            "    }",
             "}",
+            "",
+            "$parameters = @{",
+            "    Online = $true",
+            "    PackagePath = $mainPackage",
+            "    SkipLicense = $true",
+            "    ErrorAction = 'Stop'",
+            "}",
+            "if ($dependencyPackages.Count -gt 0) {",
+            "    $parameters.DependencyPackagePath = $dependencyPackages",
+            "}",
+            "if ($optionalPackages.Count -gt 0) {",
+            "    $parameters.OptionalPackagePath = $optionalPackages",
+            "}",
+            "",
+            "Add-AppxProvisionedPackage @parameters | Out-Host",
             "",
         ])
         return "\n".join(lines)
@@ -3560,7 +3854,11 @@ if ($sig.SignerCertificate) {{
 
     @staticmethod
     def prepare_intune_package_source(packages, staging_root, output_path, target_arch=SYSTEM_ARCH, package_basename="MSStoreHelper-IntuneWin"):
-        records = StoreAPI._intune_package_records(packages, output_path, target_arch)
+        records, plan = StoreAPI._intune_package_records(
+            packages,
+            output_path,
+            target_arch,
+        )
         safe_basename = StoreAPI._safe_filename_stem(package_basename, "MSStoreHelper-IntuneWin")
         staging_root = os.path.abspath(staging_root)
         source_dir = ensure_path_within_root(
@@ -3591,6 +3889,9 @@ if ($sig.SignerCertificate) {{
 
         with open(os.path.join(source_dir, install_script), "w", encoding="utf-8", newline="\r\n") as handle:
             handle.write(StoreAPI._generate_intune_install_script(records))
+        StoreAPI.validate_powershell_script(
+            os.path.join(source_dir, install_script)
+        )
 
         with open(os.path.join(source_dir, setup_file), "w", encoding="utf-8", newline="\r\n") as handle:
             handle.write("@echo off\n")
@@ -3599,6 +3900,16 @@ if ($sig.SignerCertificate) {{
 
         with open(os.path.join(source_dir, detection_script), "w", encoding="utf-8", newline="\r\n") as handle:
             handle.write(StoreAPI._generate_intune_detection_script(records))
+        StoreAPI.validate_powershell_script(
+            os.path.join(source_dir, detection_script)
+        )
+        plan_path = StoreAPI.write_install_plan(
+            plan,
+            os.path.join(
+                source_dir,
+                f"{safe_basename}.installplan.json",
+            ),
+        )
 
         with open(os.path.join(source_dir, guide_file), "w", encoding="utf-8", newline="\r\n") as handle:
             handle.write(f"Install command: {setup_file}\n")
@@ -3619,6 +3930,8 @@ if ($sig.SignerCertificate) {{
             "DetectionScript": detection_script,
             "DetectionPath": os.path.join(source_dir, detection_script),
             "GuidePath": os.path.join(source_dir, guide_file),
+            "PlanPath": plan_path,
+            "Plan": plan,
             "PackageCount": len(records),
             "ExpectedIntuneWin": f"{safe_basename}.intunewin",
         }
@@ -3693,8 +4006,123 @@ if ($sig.SignerCertificate) {{
 
             detection_sidecar = os.path.join(output_dir, f"{package_basename}-Detection.ps1")
             shutil.copy2(source_info["DetectionPath"], detection_sidecar)
+            plan_sidecar = os.path.join(
+                output_dir,
+                f"{package_basename}.installplan.json",
+            )
+            shutil.copy2(source_info["PlanPath"], plan_sidecar)
 
         return generated, detection_sidecar, source_info["PackageCount"]
+
+    @staticmethod
+    def install_plan(plan, packages, cancel_event=None):
+        try:
+            plan = validate_install_plan(
+                json.loads(json.dumps(plan))
+            )
+            if not plan.get("Installable"):
+                return False, "; ".join(
+                    conflict.get("Message", "Install plan is blocked")
+                    for conflict in plan.get("Conflicts") or []
+                    if conflict.get("Blocking")
+                )
+            by_path = {}
+            for package in packages:
+                path = package.get("LocalPath")
+                if path:
+                    by_path[os.path.normcase(os.path.abspath(path))] = (
+                        package
+                    )
+            deployment = plan["Deployment"]
+            main_path = validate_existing_package_path(
+                deployment["MainPath"],
+                require_file=True,
+            )
+            dependency_paths = [
+                validate_existing_package_path(path, require_file=True)
+                for path in deployment.get("DependencyPaths") or []
+            ]
+            external_paths = [
+                validate_existing_package_path(path, require_file=True)
+                for path in deployment.get("ExternalPackagePaths") or []
+            ]
+            for path in [main_path] + dependency_paths + external_paths:
+                package = by_path.get(
+                    os.path.normcase(os.path.abspath(path))
+                )
+                if package is None:
+                    return (
+                        False,
+                        "Install plan package metadata is missing for "
+                        f"{os.path.basename(path)}",
+                    )
+                trust_ok, trust_message, _report = (
+                    StoreAPI.package_trust_status(package, path)
+                )
+                if not trust_ok:
+                    return False, trust_message
+
+            if (
+                plan["Main"].get("Action") == "skip"
+                and not dependency_paths
+                and not external_paths
+            ):
+                return True, "Inspected plan is already current"
+
+            command = "\n".join([
+                "$ErrorActionPreference = 'Stop'",
+                "$main = $env:MSSTOREHELPER_MAIN_PACKAGE",
+                (
+                    "$dependencies = @("
+                    "$env:MSSTOREHELPER_DEPENDENCY_PACKAGES "
+                    "| ConvertFrom-Json)"
+                ),
+                (
+                    "$external = @("
+                    "$env:MSSTOREHELPER_EXTERNAL_PACKAGES "
+                    "| ConvertFrom-Json)"
+                ),
+                "$parameters = @{ Path = $main; ErrorAction = 'Stop' }",
+                "if ($dependencies.Count -gt 0) {",
+                "  $parameters.DependencyPath = [string[]]$dependencies",
+                "}",
+                "if ($external.Count -gt 0) {",
+                "  $parameters.ExternalPackages = [string[]]$external",
+                "}",
+                "Add-AppxPackage @parameters",
+            ])
+            environment = os.environ.copy()
+            environment["MSSTOREHELPER_MAIN_PACKAGE"] = main_path
+            environment["MSSTOREHELPER_DEPENDENCY_PACKAGES"] = json.dumps(
+                dependency_paths
+            )
+            environment["MSSTOREHELPER_EXTERNAL_PACKAGES"] = json.dumps(
+                external_paths
+            )
+            result = run_command(
+                [
+                    POWERSHELL_EXE,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    command,
+                ],
+                timeout=600,
+                cancel_event=cancel_event,
+                env=environment,
+            )
+            if result.returncode:
+                return (
+                    False,
+                    (
+                        result.stderr
+                        or result.stdout
+                        or "Add-AppxPackage failed"
+                    ).strip(),
+                )
+            return True, "Inspected install plan completed atomically"
+        except Exception as exc:
+            return False, str(exc)
 
     @staticmethod
     def install_package(filepath, package=None, cancel_event=None):
@@ -7855,6 +8283,7 @@ Fixes "needs to be online" and similar errors.
                 identity,
                 path,
                 candidate,
+                target_arch,
                 cancel_event=context.cancel_event,
             )
             if context.cancellation_requested:
@@ -7919,10 +8348,13 @@ Fixes "needs to be online" and similar errors.
         self._post_ui(
             lambda: self._log(
                 "INFO",
-                "Dependencies are installed before application packages.",
+                (
+                    "Inspecting manifests before one main-app "
+                    "deployment transaction."
+                ),
             )
         )
-        _report, blocker = self._windows_workflow_preflight(
+        report, blocker = self._windows_workflow_preflight(
             required_services={
                 "AppXSvc",
                 "ClipSVC",
@@ -7947,155 +8379,215 @@ Fixes "needs to be online" and similar errors.
             )
             self._post_inventory_failure("Install", inventory)
             return
-        total = len(packages)
-        
-        for i, pkg in enumerate(packages):
-            if context.cancellation_requested:
-                for remaining in packages[i:]:
-                    context.cancelled(
-                        remaining.get("FileName") or "package",
-                        "Installation was cancelled before this package started",
-                    )
-                break
-            fname = pkg['FileName']
-            context.progress(
-                i / total,
-                f"Installing {fname} ({i + 1}/{total})",
-            )
+        prepared = []
+        for package in packages:
+            filename = package.get("FileName") or "package"
             try:
                 filepath = validate_existing_package_path(
-                    pkg["LocalPath"],
-                    expected_filename=fname,
+                    package["LocalPath"],
+                    expected_filename=filename,
                     require_file=True,
                 )
             except PackageIngressError as exc:
-                context.failed(fname, str(exc))
+                context.failed(filename, str(exc))
                 self._post_ui(
-                    lambda n=fname: self._set_queue_item_status(
+                    lambda n=filename: self._set_queue_item_status(
                         n,
                         "Path blocked",
                         Theme.DANGER,
                     )
                 )
-                self._post_ui(lambda n=fname, e=str(exc): self._log("ERROR", f"  Blocked unsafe package path for {n}: {e}"))
+                self._post_ui(
+                    lambda n=filename, e=str(exc): self._log(
+                        "ERROR",
+                        f"Blocked unsafe package path for {n}: {e}",
+                    )
+                )
                 continue
-            package_name = pkg.get("PackageIdentity") or package_identity(fname)
-            available_version = pkg.get("AvailableVersion") or format_version_tuple(package_version_tuple(fname))
-            
-            self._post_ui(lambda n=fname, idx=i+1, tot=total: self._log("INFO", f"[{idx}/{tot}] Installing: {n}"))
-            self._post_ui(lambda p=filepath: self._log("DEBUG", f"  Path: {p}"))
+            package["LocalPath"] = filepath
+            prepared.append(package)
+        if len(prepared) != len(packages):
+            context.progress(
+                1.0,
+                "Install planning stopped on unsafe package paths",
+            )
+            return
+        if context.cancellation_requested:
+            for package in prepared:
+                context.cancelled(
+                    package.get("FileName") or "package",
+                    "Installation was cancelled before planning",
+                )
+            return
+        context.progress(0.2, "Building inspected install plan")
+        try:
+            plan = StoreAPI.build_install_plan(
+                prepared,
+                self.output_path,
+                self._target_arch(),
+                inventory=inventory,
+                target_os_version=(
+                    (report.get("Platform") or {}).get("Build")
+                    or ""
+                ),
+            )
+        except (InstallPlanError, ValueError) as exc:
+            message = str(exc)
+            context.failed("install-plan", message)
             self._post_ui(
-                lambda n=fname: self._set_queue_item_status(
-                    n,
-                    "Installing…",
-                    Theme.INFO,
+                lambda text=message: self._log(
+                    "ERROR",
+                    f"Install plan blocked: {text}",
                 )
             )
+            self._post_ui(
+                lambda: self._update_status(
+                    "Install plan blocked",
+                    Theme.DANGER,
+                )
+            )
+            return
+        plan_text = render_install_plan(plan)
+        self._post_ui(
+            lambda text=plan_text: self._log(
+                "INFO",
+                f"Inspected install plan:\n{text}",
+            )
+        )
+        if not plan["Installable"]:
+            blocking = [
+                conflict["Message"]
+                for conflict in plan["Conflicts"]
+                if conflict.get("Blocking")
+            ]
+            message = "; ".join(blocking) or "Install plan is blocked"
+            context.failed(
+                "install-plan",
+                message,
+                Conflicts=plan["Conflicts"],
+            )
+            self._post_ui(
+                lambda text=message: self._log(
+                    "ERROR",
+                    f"Install plan blocked: {text}",
+                )
+            )
+            self._post_ui(
+                lambda: self._update_status(
+                    "Install plan blocked",
+                    Theme.DANGER,
+                )
+            )
+            return
 
-            should_skip, installed_version, package_name = (
-                StoreAPI.should_skip_installed_package(
-                    pkg,
-                    inventory,
+        planned = (
+            plan["Dependencies"]
+            + plan["ResourcePackages"]
+            + plan["OptionalPackages"]
+            + [plan["Main"]]
+        )
+        for item in plan.get("UnusedPackages") or []:
+            context.skipped(
+                item["FileName"],
+                "Not referenced by an inspected manifest",
+            )
+            self._post_ui(
+                lambda n=item["FileName"]: self._set_queue_item_status(
+                    n,
+                    "Not required",
+                    Theme.TEXT_MUTED,
                 )
             )
-            if should_skip:
+        for item in planned:
+            filename = item["FileName"]
+            if item["Action"] == "skip":
                 context.skipped(
-                    fname,
-                    f"Installed {installed_version} is current",
-                    InstalledVersion=installed_version,
-                    AvailableVersion=available_version,
+                    filename,
+                    (
+                        f"Installed {item.get('InstalledVersion')} "
+                        "already satisfies the inspected artifact"
+                    ),
                 )
                 self._post_ui(
-                    lambda n=fname: self._set_queue_item_status(
+                    lambda n=filename: self._set_queue_item_status(
                         n,
                         "Up to date",
                         Theme.SUCCESS,
                     )
                 )
-                self._post_ui(lambda n=package_name, installed=installed_version, available=available_version: self._log("SUCCESS", f"  Skipped {n}: installed {installed} >= available {available}"))
                 continue
-
-            signature_ok, signature_msg = StoreAPI.verify_package_signature(
-                filepath,
-                pkg,
-            )
-            if not signature_ok:
-                context.failed(
-                    fname,
-                    f"Signature verification blocked installation: {signature_msg}",
-                    TrustState=pkg.get("TrustState", ""),
+            self._post_ui(
+                lambda n=filename: self._set_queue_item_status(
+                    n,
+                    "Installing plan…",
+                    Theme.INFO,
                 )
-                self._post_ui(
-                    lambda n=fname: self._set_queue_item_status(
-                        n,
-                        "Signature blocked",
-                        Theme.DANGER,
-                    )
-                )
-                self._post_ui(lambda n=fname, m=signature_msg: self._log("ERROR", f"  Signature verification blocked {n}: {m}"))
-                continue
-
-            self._post_ui(lambda m=signature_msg: self._log("DEBUG", f"  Signature verified: {m}"))
-            
-            success, error_msg = StoreAPI.install_package(
-                filepath,
-                pkg,
-                cancel_event=context.cancel_event,
             )
-            
-            if context.cancellation_requested:
-                context.cancelled(fname, error_msg)
+
+        context.progress(0.5, "Executing inspected install plan")
+        success, message = StoreAPI.install_plan(
+            plan,
+            prepared,
+            cancel_event=context.cancel_event,
+        )
+        if context.cancellation_requested:
+            for item in planned:
+                if item["Action"] != "install":
+                    continue
+                context.cancelled(item["FileName"], message)
                 self._post_ui(
-                    lambda n=fname: self._set_queue_item_status(
+                    lambda n=item["FileName"]: self._set_queue_item_status(
                         n,
                         "Cancelled",
                         Theme.WARNING,
                     )
                 )
-                for remaining in packages[i + 1:]:
-                    context.cancelled(
-                        remaining.get("FileName") or "package",
-                        "Installation was cancelled before this package started",
-                    )
-                break
-            if success:
-                context.succeeded(fname, error_msg, LocalPath=filepath)
+        elif success:
+            for item in planned:
+                if item["Action"] != "install":
+                    continue
+                context.succeeded(
+                    item["FileName"],
+                    message,
+                    LocalPath=item["Path"],
+                    PlanSchemaVersion=plan["SchemaVersion"],
+                )
                 self._post_ui(
-                    lambda n=fname: self._set_queue_item_status(
+                    lambda n=item["FileName"]: self._set_queue_item_status(
                         n,
                         "✅ Installed",
                         Theme.SUCCESS,
                     )
                 )
-                self._post_ui(lambda n=fname: self._log("SUCCESS", f"  Successfully installed: {n}"))
-                continue
-            if StoreAPI.is_noop_install_error(error_msg):
-                context.skipped(fname, error_msg)
+            self._post_ui(
+                lambda text=message: self._log("SUCCESS", text)
+            )
+        else:
+            for item in planned:
+                if item["Action"] != "install":
+                    continue
+                context.failed(
+                    item["FileName"],
+                    message,
+                    PlanSchemaVersion=plan["SchemaVersion"],
+                )
                 self._post_ui(
-                    lambda n=fname: self._set_queue_item_status(
+                    lambda n=item["FileName"]: self._set_queue_item_status(
                         n,
-                        "Already current",
-                        Theme.SUCCESS,
+                        "❌ Error",
+                        Theme.DANGER,
                     )
                 )
-                self._post_ui(lambda n=package_name: self._log("SUCCESS", f"  No-op for {n}: installed version is already newer"))
-                continue
-
-            context.failed(fname, error_msg)
             self._post_ui(
-                lambda n=fname: self._set_queue_item_status(
-                    n,
-                    "❌ Error",
-                    Theme.DANGER,
+                lambda text=message: self._log(
+                    "ERROR",
+                    f"Install plan failed: {text}",
                 )
             )
-            self._post_ui(lambda n=fname: self._log("ERROR", f"  Failed to install: {n}"))
-            for detail in error_msg.splitlines():
-                detail = detail.strip()
-                if detail:
-                    self._post_ui(lambda value=detail: self._log("ERROR", f"    {value}"))
-
-        context.progress(1.0, f"Installation operation processed {total} package(s)")
+        context.progress(
+            1.0,
+            f"Inspected plan processed {len(planned)} package(s)",
+        )
     
     def _run_repair(self):
         self._inspect_repair_plan("store-repair")
@@ -8724,6 +9216,14 @@ def build_cli_parser():
     parser.add_argument("--tls-key", help="PEM private key for an HTTPS mirror.")
     parser.add_argument("--mirror-token-ttl", type=int, default=900, help="LAN bearer-token lifetime in seconds (60-3600).")
     parser.add_argument("--mirror-index-only", action="store_true", help="Write the mirror index and exit instead of serving forever.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "With --install, download and validate an inspected "
+            "install plan without invoking Add-AppxPackage."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Emit a machine-readable JSON summary.")
     return parser
 
@@ -8858,11 +9358,12 @@ def _cli_install_downloaded(
     stderr,
     context=None,
     inventory=None,
+    output_path=None,
+    target_arch=SYSTEM_ARCH,
+    target_os_version="",
+    dry_run=False,
 ):
-    success_count = 0
-    skipped_count = 0
-    failed_count = 0
-
+    prepared = []
     for package in packages:
         try:
             package = validate_package_record(package, require_url=False)
@@ -8872,7 +9373,6 @@ def _cli_install_downloaded(
                 require_file=True,
             )
         except PackageIngressError as exc:
-            failed_count += 1
             _cli_set_package_record(
                 records,
                 package if isinstance(package, dict) else {},
@@ -8888,60 +9388,195 @@ def _cli_install_downloaded(
                     str(exc),
                 )
             continue
+        package["LocalPath"] = local_path
+        prepared.append(package)
+    if len(prepared) != len(packages):
+        return 0, 0, len(packages) - len(prepared), None
 
-        should_skip, installed_version, package_name = (
-            StoreAPI.should_skip_installed_package(
+    try:
+        plan = StoreAPI.build_install_plan(
+            prepared,
+            output_path or os.path.dirname(prepared[0]["LocalPath"]),
+            target_arch,
+            inventory=inventory,
+            target_os_version=target_os_version,
+        )
+    except (InstallPlanError, ValueError) as exc:
+        message = f"install plan blocked: {exc}"
+        _cli_print(message, stderr)
+        for package in prepared:
+            _cli_set_package_record(
+                records,
                 package,
-                inventory,
+                "failed",
+                message,
+                package["LocalPath"],
             )
-        )
-        if should_skip:
-            skipped_count += 1
-            _cli_set_package_record(records, package, "skipped", f"installed {installed_version} is current", local_path)
             if context is not None:
-                context.skipped(
-                    package["FileName"],
-                    f"Installed {installed_version} is current",
-                )
-            continue
+                context.failed(package["FileName"], message)
+        return 0, 0, len(prepared), None
 
-        signature_ok, signature_message = StoreAPI.verify_package_signature(
-            local_path,
+    planned = (
+        plan["Dependencies"]
+        + plan["ResourcePackages"]
+        + plan["OptionalPackages"]
+        + [plan["Main"]]
+    )
+    skipped_count = 0
+    for item in plan.get("UnusedPackages") or []:
+        package = next(
+            value
+            for value in prepared
+            if value["FileName"] == item["FileName"]
+        )
+        skipped_count += 1
+        _cli_set_package_record(
+            records,
             package,
+            "skipped",
+            "not referenced by an inspected manifest",
+            package["LocalPath"],
         )
-        if not signature_ok:
-            failed_count += 1
-            _cli_print(f"signature blocked: {package.get('FileName')}: {signature_message}", stderr)
-            _cli_set_package_record(records, package, "failed", f"signature blocked: {signature_message}", local_path)
+        if context is not None:
+            context.skipped(
+                package["FileName"],
+                "Not referenced by an inspected manifest",
+            )
+    for item in planned:
+        if item["Action"] != "skip":
+            continue
+        package = next(
+            value
+            for value in prepared
+            if value["FileName"] == item["FileName"]
+        )
+        skipped_count += 1
+        message = (
+            f"installed {item.get('InstalledVersion')} is current"
+        )
+        _cli_set_package_record(
+            records,
+            package,
+            "skipped",
+            message,
+            package["LocalPath"],
+        )
+        if context is not None:
+            context.skipped(package["FileName"], message)
+
+    if not plan["Installable"]:
+        message = "; ".join(
+            conflict["Message"]
+            for conflict in plan["Conflicts"]
+            if conflict.get("Blocking")
+        )
+        _cli_print(f"install plan blocked: {message}", stderr)
+        failed = 0
+        for item in planned:
+            if item["Action"] != "install":
+                continue
+            package = next(
+                value
+                for value in prepared
+                if value["FileName"] == item["FileName"]
+            )
+            failed += 1
+            _cli_set_package_record(
+                records,
+                package,
+                "failed",
+                message,
+                package["LocalPath"],
+            )
             if context is not None:
-                context.failed(
+                context.failed(package["FileName"], message)
+        return 0, skipped_count, failed, plan
+
+    install_items = [
+        item for item in planned if item["Action"] == "install"
+    ]
+    if dry_run:
+        for item in install_items:
+            package = next(
+                value
+                for value in prepared
+                if value["FileName"] == item["FileName"]
+            )
+            _cli_set_package_record(
+                records,
+                package,
+                "planned",
+                f"inspected {item['Role']} package",
+                package["LocalPath"],
+            )
+            if context is not None:
+                context.succeeded(
                     package["FileName"],
-                    f"Signature blocked: {signature_message}",
+                    "Dry-run plan validated",
                 )
-            continue
+        return len(install_items), skipped_count, 0, plan
 
-        ok, install_message = StoreAPI.install_package(local_path, package)
-        if ok:
-            success_count += 1
-            _cli_set_package_record(records, package, "installed", install_message, local_path)
+    ok, install_message = StoreAPI.install_plan(
+        plan,
+        prepared,
+    )
+    if ok:
+        for item in install_items:
+            package = next(
+                value
+                for value in prepared
+                if value["FileName"] == item["FileName"]
+            )
+            _cli_set_package_record(
+                records,
+                package,
+                "installed",
+                install_message,
+                package["LocalPath"],
+            )
             if context is not None:
-                context.succeeded(package["FileName"], install_message)
-            continue
+                context.succeeded(
+                    package["FileName"],
+                    install_message,
+                )
+        return len(install_items), skipped_count, 0, plan
 
-        if StoreAPI.is_noop_install_error(install_message):
+    if StoreAPI.is_noop_install_error(install_message):
+        for item in install_items:
+            package = next(
+                value
+                for value in prepared
+                if value["FileName"] == item["FileName"]
+            )
             skipped_count += 1
-            _cli_set_package_record(records, package, "skipped", f"{package_name}: {install_message}", local_path)
+            _cli_set_package_record(
+                records,
+                package,
+                "skipped",
+                install_message,
+                package["LocalPath"],
+            )
             if context is not None:
                 context.skipped(package["FileName"], install_message)
-            continue
+        return 0, skipped_count, 0, plan
 
-        failed_count += 1
-        _cli_print(f"install failed: {package.get('FileName')}: {install_message}", stderr)
-        _cli_set_package_record(records, package, "failed", install_message, local_path)
+    _cli_print(f"install plan failed: {install_message}", stderr)
+    for item in install_items:
+        package = next(
+            value
+            for value in prepared
+            if value["FileName"] == item["FileName"]
+        )
+        _cli_set_package_record(
+            records,
+            package,
+            "failed",
+            install_message,
+            package["LocalPath"],
+        )
         if context is not None:
             context.failed(package["FileName"], install_message)
-
-    return success_count, skipped_count, failed_count
+    return 0, skipped_count, len(install_items), plan
 
 
 def _cli_package_workflow(args, stdout, stderr):
@@ -8967,7 +9602,11 @@ def _cli_package_workflow(args, stdout, stderr):
         _cli_print(f"error: no installable packages were selected for {app.get('Name')}", stderr)
         return 1
 
-    action = "install" if args.install else "download"
+    action = (
+        "install-plan"
+        if args.install and args.dry_run
+        else ("install" if args.install else "download")
+    )
     output_path = os.path.abspath(args.output)
     summary = {
         "Action": action,
@@ -8977,6 +9616,7 @@ def _cli_package_workflow(args, stdout, stderr):
         "StoreQuery": diagnostic.get("Query", StoreAPI.package_query_metadata(app["ProductId"], args.ring, args.language, args.market)),
         "Errors": errors,
         "Packages": [],
+        "DryRun": bool(args.install and args.dry_run),
     }
     install_inventory = None
     preflight_blocker = ""
@@ -9031,7 +9671,7 @@ def _cli_package_workflow(args, stdout, stderr):
                 InventoryStatus=install_inventory.get("Status"),
             )
             return context.result.inferred_terminal_state()
-        if args.install and not IS_ADMIN:
+        if args.install and not args.dry_run and not IS_ADMIN:
             message = (
                 "Administrator rights are required for --install. "
                 "Next action: reopen the terminal as Administrator "
@@ -9052,16 +9692,28 @@ def _cli_package_workflow(args, stdout, stderr):
             return context.result.inferred_terminal_state()
         if not args.install:
             return context.result.inferred_terminal_state()
-        installed, skipped, failed = _cli_install_downloaded(
-            downloaded,
-            records,
-            stderr,
-            context,
-            install_inventory,
+        installed, skipped, failed, install_plan = (
+            _cli_install_downloaded(
+                downloaded,
+                records,
+                stderr,
+                context,
+                install_inventory,
+                output_path,
+                target_arch,
+                (
+                    (
+                        summary.get("WindowsCapability") or {}
+                    ).get("Platform") or {}
+                ).get("Build", ""),
+                args.dry_run,
+            )
         )
         workflow["Installed"] = installed
         workflow["Skipped"] = skipped
         workflow["Failed"] = failed
+        if install_plan is not None:
+            workflow["InstallPlan"] = install_plan
         return context.result.inferred_terminal_state()
 
     result = OperationCoordinator(
@@ -9079,6 +9731,8 @@ def _cli_package_workflow(args, stdout, stderr):
     for name in ("Installed", "Skipped", "Failed"):
         if name in workflow:
             summary[name] = workflow[name]
+    if "InstallPlan" in workflow:
+        summary["InstallPlan"] = workflow["InstallPlan"]
     summary["Operation"] = result.to_dict()
     _cli_emit_summary(summary, args.json, stdout)
     return result.exit_code
@@ -9174,6 +9828,8 @@ def run_cli(argv=None, stdout=None, stderr=None):
     stderr = stderr or sys.stderr
     parser = build_cli_parser()
     args = parser.parse_args(argv)
+    if args.dry_run and not args.install:
+        parser.error("--dry-run requires --install")
     if args.search:
         return _cli_search(args.search, args, stdout, stderr)
     if args.mirror:

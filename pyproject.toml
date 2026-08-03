@@ -22,4 +22,4 @@ dependencies = [
 msstorehelper = "MSStoreHelper:main"
 
 [tool.setuptools]
-py-modules = ["MSStoreHelper", "command_runner", "diagnostic_bundle", "http_downloader", "mirror_service", "msstore_package_resolution", "operation_coordinator", "package_ingress", "package_trust", "repair_transaction", "state_repository", "store_sources", "windows_capabilities"]
+py-modules = ["MSStoreHelper", "appx_install_planner", "command_runner", "diagnostic_bundle", "http_downloader", "mirror_service", "msstore_package_resolution", "operation_coordinator", "package_ingress", "package_trust", "repair_transaction", "state_repository", "store_sources", "windows_capabilities"]
